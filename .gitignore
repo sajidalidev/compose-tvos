@@ -1,0 +1,4 @@
+/build/
+/.gradle/
+/demo/.gradle/
+/demo/build/
