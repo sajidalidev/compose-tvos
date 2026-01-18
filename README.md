@@ -125,16 +125,14 @@ Override these with `versionMappings` if needed.
 
 ### Artifacts not found
 
-Ensure your repositories include mavenLocal and the JetBrains Compose dev repository:
+Ensure your repositories include Maven Central:
 
 ```kotlin
 // settings.gradle.kts
 dependencyResolutionManagement {
     repositories {
-        mavenLocal()
         google()
         mavenCentral()
-        maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
     }
 }
 ```
