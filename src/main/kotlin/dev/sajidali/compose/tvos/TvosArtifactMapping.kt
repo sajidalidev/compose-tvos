@@ -1,136 +1,325 @@
 package dev.sajidali.compose.tvos
 
+import org.gradle.api.logging.Logger
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
+
 /**
- * tvOS target suffixes used in Kotlin Multiplatform artifact names.
- * Note: Artifact names typically use lowercase suffixes.
+ * Represents a discovered tvOS variant from module metadata.
+ */
+data class TvosVariant(
+    val variantName: String,
+    val nativeTarget: String,
+    val artifactId: String
+)
+
+/**
+ * Pattern-based tvOS artifact detection.
  */
 object TvosTargets {
-    const val TVOS_ARM64 = "tvosarm64"
-    const val TVOS_X64 = "tvosx64"
-    const val TVOS_SIMULATOR_ARM64 = "tvossimulatorarm64"
+    private val TVOS_SUFFIX_PATTERN = Regex("-(tvos[A-Za-z0-9_]+)$", RegexOption.IGNORE_CASE)
 
-    val ALL = setOf(TVOS_ARM64, TVOS_X64, TVOS_SIMULATOR_ARM64)
+    fun matchesTvosSuffix(moduleName: String): Boolean =
+        TVOS_SUFFIX_PATTERN.containsMatchIn(moduleName)
 
-    // Check if module name ends with any tvOS suffix (case-insensitive)
-    fun matchesTvosSuffix(moduleName: String): Boolean {
-        val lowerModule = moduleName.lowercase()
-        return ALL.any { suffix -> lowerModule.endsWith("-$suffix") }
+    fun extractTvosSuffix(moduleName: String): String? {
+        val match = TVOS_SUFFIX_PATTERN.find(moduleName) ?: return null
+        return "-${match.groupValues[1]}"
     }
 }
 
 /**
- * JetBrains Compose Multiplatform group IDs that should be redirected for tvOS targets.
+ * Discovers tvOS variants from target module's Gradle Module Metadata.
+ */
+object TvosVariantDiscovery {
+    private val variantCache = ConcurrentHashMap<String, List<TvosVariant>>()
+    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache"
+
+    fun discoverVariants(
+        repositoryUrls: List<String>,
+        groupId: String,
+        artifactId: String,
+        version: String,
+        cacheDir: File?,
+        logger: Logger? = null
+    ): List<TvosVariant> {
+        val cacheKey = "$groupId:$artifactId:$version"
+
+        variantCache[cacheKey]?.let { return it }
+
+        if (!version.contains("SNAPSHOT") && cacheDir != null) {
+            readFromFileCache(cacheDir, cacheKey)?.let {
+                variantCache[cacheKey] = it
+                return it
+            }
+        }
+
+        var variants: List<TvosVariant> = emptyList()
+        for (repoUrl in repositoryUrls) {
+            variants = fetchAndParseMetadata(repoUrl, groupId, artifactId, version, logger)
+            if (variants.isNotEmpty()) break
+        }
+
+        if (variants.isNotEmpty()) {
+            variantCache[cacheKey] = variants
+            if (!version.contains("SNAPSHOT") && cacheDir != null) {
+                writeToFileCache(cacheDir, cacheKey, variants)
+            }
+        }
+
+        return variants
+    }
+
+    private fun fetchAndParseMetadata(
+        repositoryUrl: String,
+        groupId: String,
+        artifactId: String,
+        version: String,
+        logger: Logger?
+    ): List<TvosVariant> {
+        val baseUrl = repositoryUrl.trimEnd('/')
+        val groupPath = groupId.replace('.', '/')
+        val modulePath = "$groupPath/$artifactId/$version/$artifactId-$version.module"
+
+        return try {
+            if (baseUrl.startsWith("file:")) {
+                fetchFromFileUrl(baseUrl, modulePath, artifactId, logger)
+            } else {
+                fetchFromHttpUrl("$baseUrl/$modulePath", artifactId, logger)
+            }
+        } catch (e: Exception) {
+            logger?.info("[ComposeTvosRedirect] Failed to fetch metadata: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun fetchFromFileUrl(baseUrl: String, modulePath: String, artifactId: String, logger: Logger?): List<TvosVariant> {
+        val basePath = baseUrl.removePrefix("file:").trimStart('/')
+        val absolutePath = if (baseUrl.startsWith("file:///") || baseUrl.startsWith("file:/") && !baseUrl.startsWith("file://")) {
+            "/$basePath"
+        } else {
+            basePath
+        }
+        val moduleFile = File(absolutePath, modulePath)
+
+        return if (moduleFile.exists() && moduleFile.isFile) {
+            parseModuleMetadata(moduleFile.readText(), logger, artifactId)
+        } else {
+            emptyList()
+        }
+    }
+
+    private fun fetchFromHttpUrl(moduleUrl: String, artifactId: String, logger: Logger?): List<TvosVariant> {
+        val connection = URL(moduleUrl).openConnection() as HttpURLConnection
+        connection.connectTimeout = 5_000
+        connection.readTimeout = 5_000
+        connection.requestMethod = "GET"
+
+        return if (connection.responseCode == 200) {
+            parseModuleMetadata(connection.inputStream.bufferedReader().readText(), logger, artifactId)
+        } else {
+            emptyList()
+        }
+    }
+
+    internal fun parseModuleMetadata(json: String, logger: Logger? = null, baseArtifactId: String? = null): List<TvosVariant> {
+        val variants = mutableListOf<TvosVariant>()
+
+        val nativeTargetPattern = Regex(""""org\.jetbrains\.kotlin\.native\.target"\s*:\s*"(tvos_[^"]+)"""")
+        val availableAtModulePattern = Regex(""""available-at"\s*:\s*\{[^}]*"module"\s*:\s*"([^"]+)"""", RegexOption.DOT_MATCHES_ALL)
+        val namePattern = Regex(""""name"\s*:\s*"([^"]+)"""")
+
+        val tvosSections = json.split(Regex("""(?=\{\s*"name"\s*:)""")).filter { it.contains("tvos_") }
+
+        for (section in tvosSections) {
+            val nameMatch = namePattern.find(section) ?: continue
+            val variantName = nameMatch.groupValues[1]
+
+            if (!variantName.contains("Api", ignoreCase = true)) continue
+
+            val targetMatch = nativeTargetPattern.find(section) ?: continue
+            val nativeTarget = targetMatch.groupValues[1]
+
+            val availableAtMatch = availableAtModulePattern.find(section)
+            val moduleArtifactId = if (availableAtMatch != null) {
+                availableAtMatch.groupValues[1]
+            } else if (baseArtifactId != null) {
+                val targetSuffix = nativeTarget.replace("_", "")
+                "$baseArtifactId-$targetSuffix"
+            } else {
+                nativeTarget.replace("_", "")
+            }
+
+            variants.add(TvosVariant(variantName, nativeTarget, moduleArtifactId))
+        }
+
+        return variants.distinctBy { it.nativeTarget }
+    }
+
+    private fun readFromFileCache(cacheDir: File, cacheKey: String): List<TvosVariant>? {
+        val cacheFile = getCacheFile(cacheDir, cacheKey)
+        if (!cacheFile.exists()) return null
+
+        return try {
+            cacheFile.readLines().mapNotNull { line ->
+                val parts = line.split("|")
+                if (parts.size == 3) TvosVariant(parts[0], parts[1], parts[2]) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun writeToFileCache(cacheDir: File, cacheKey: String, variants: List<TvosVariant>) {
+        val cacheFile = getCacheFile(cacheDir, cacheKey)
+        try {
+            cacheFile.parentFile?.mkdirs()
+            cacheFile.writeText(variants.joinToString("\n") { "${it.variantName}|${it.nativeTarget}|${it.artifactId}" })
+        } catch (_: Exception) { }
+    }
+
+    private fun getCacheFile(cacheDir: File, cacheKey: String): File {
+        val safeKey = cacheKey.replace(":", "_").replace(".", "_")
+        return File(cacheDir, "$CACHE_DIR_NAME/$safeKey.cache")
+    }
+
+    fun clearCache() {
+        variantCache.clear()
+    }
+}
+
+/**
+ * Compose Multiplatform group IDs that should be redirected for tvOS.
  */
 object ComposeModules {
-    const val UI = "org.jetbrains.compose.ui"
-    const val FOUNDATION = "org.jetbrains.compose.foundation"
-    const val RUNTIME = "org.jetbrains.compose.runtime"
-    const val MATERIAL = "org.jetbrains.compose.material"
-    const val MATERIAL3 = "org.jetbrains.compose.material3"
-    const val ANIMATION = "org.jetbrains.compose.animation"
-    const val COMPONENTS = "org.jetbrains.compose.components"
-
-    const val NAVIGATION = "org.jetbrains.androidx.navigation"
-
     val ALL = setOf(
-        UI,
-        FOUNDATION,
-        RUNTIME,
-        MATERIAL,
-        MATERIAL3,
-        ANIMATION,
-        COMPONENTS,
-        NAVIGATION
+        "org.jetbrains.compose.ui",
+        "org.jetbrains.compose.foundation",
+        "org.jetbrains.compose.runtime",
+        "org.jetbrains.compose.material",
+        "org.jetbrains.compose.material3",
+        "org.jetbrains.compose.animation",
+        "org.jetbrains.compose.components",
+        "org.jetbrains.androidx.navigation"
     )
 }
 
 /**
- * Predefined artifact mappings for specific group:artifact combinations.
- * Maps source "group:artifact" to target "group:artifact".
- *
- * Use this for libraries that need artifact-level matching rather than group-level matching.
+ * Specific artifact mappings for non-standard module names.
  */
 object ComposeArtifacts {
     private const val JETBRAINS_PREFIX = "org.jetbrains"
     private const val TARGET_PREFIX = "dev.sajidali"
 
-    // Navigation
-    const val NAVIGATION_COMPOSE = "org.jetbrains.androidx.navigation:navigation-compose"
-
-    // Lifecycle
-    const val LIFECYCLE_VIEWMODEL_COMPOSE = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose"
-    const val LIFECYCLE_VIEWMODEL_NAVIGATION3 = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-navigation3"
-
-    const val NAVIGATION3_UI = "org.jetbrains.androidx.navigation3:navigation3-ui"
-
-    const val NAVIGATIONEVENT_COMPOSE = "org.jetbrains.androidx.navigation:navigationevent-compose"
-
-    const val SAVEDSTATE_COMPOSE = "org.jetbrains.androidx.savedstate:savedstate-compose"
-
-    /**
-     * All predefined artifact coordinates (group:artifact format).
-     */
     val ALL = setOf(
-        NAVIGATION_COMPOSE,
-        LIFECYCLE_VIEWMODEL_COMPOSE,
-        LIFECYCLE_VIEWMODEL_NAVIGATION3,
-        NAVIGATION3_UI,
-        NAVIGATIONEVENT_COMPOSE,
-        SAVEDSTATE_COMPOSE
+        "org.jetbrains.androidx.navigation:navigation-compose",
+        "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose",
+        "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-navigation3",
+        "org.jetbrains.androidx.navigation3:navigation3-ui",
+        "org.jetbrains.androidx.savedstate:savedstate-compose"
     )
 
-    /**
-     * Maps source artifact coordinate to target artifact coordinate.
-     * Example: "org.jetbrains.androidx.navigation:navigation-compose" -> "dev.sajidali.androidx.navigation:navigation-compose"
-     */
-    fun mapArtifact(sourceCoordinate: String): String {
-        return sourceCoordinate.replace(JETBRAINS_PREFIX, TARGET_PREFIX)
-    }
-
-    /**
-     * Checks if the given group:artifact coordinate is a predefined Compose artifact.
-     */
-    fun isComposeArtifact(groupId: String, artifactId: String): Boolean {
-        return "$groupId:$artifactId" in ALL
-    }
-
-    /**
-     * Gets the target group and artifact for a source coordinate.
-     * Returns Pair(targetGroup, targetArtifact) or null if not a predefined artifact.
-     */
     fun getTargetMapping(groupId: String, artifactId: String): Pair<String, String>? {
-        val sourceCoordinate = "$groupId:$artifactId"
-        if (sourceCoordinate !in ALL) return null
-
-        val targetCoordinate = mapArtifact(sourceCoordinate)
-        val parts = targetCoordinate.split(":")
+        val source = "$groupId:$artifactId"
+        if (source !in ALL) return null
+        val target = source.replace(JETBRAINS_PREFIX, TARGET_PREFIX)
+        val parts = target.split(":")
         return if (parts.size == 2) Pair(parts[0], parts[1]) else null
     }
 }
 
 /**
- * Non-tvOS platform suffixes that should NOT be redirected.
+ * Version pattern matching and mapping.
  */
-object OtherPlatformSuffixes {
-    val ALL = setOf(
-        // iOS
-        "iosarm64", "iosx64", "iossimulatorarm64",
-        "uikitarm64", "uikitx64", "uikitsimulatorarm64",
-        // Android
-        "android", "android-debug", "android-release",
-        // Desktop/JVM
-        "desktop", "jvm",
-        // macOS
-        "macosarm64", "macosx64",
-        // watchOS
-        "watchosarm32", "watchosarm64", "watchosx64", "watchossimulatorarm64", "watchosdevicearm64",
-        // Linux
-        "linuxarm64", "linuxx64",
-        // Windows
-        "mingwx64",
-        // Web
-        "js", "wasmjs", "wasm"
+object ComposeVersions {
+    val ALL: Map<String, String> = mapOf(
+        "org.jetbrains.compose.*:1.10.*" to "1.10.0",
+        "org.jetbrains.compose.material3:1.10.*" to "1.10.0-alpha05",
+        "org.jetbrains.androidx.lifecycle:2.9.*" to "2.10.0-alpha06",
+        "org.jetbrains.androidx.navigation:2.9.*" to "2.9.1",
+        "org.jetbrains.androidx.navigation3:1.0.*" to "1.0.0-alpha06",
+        "org.jetbrains.androidx.savedstate:1.4.*" to "1.4.0",
     )
+
+    fun resolveVersion(
+        groupId: String,
+        artifactId: String,
+        originalVersion: String,
+        versionMappings: Map<String, String>,
+        targetVersionOverride: String?
+    ): String {
+        // Priority 1: Exact artifact match (group:artifact:version)
+        for ((key, targetVersion) in versionMappings) {
+            val parts = key.split(":")
+            if (parts.size == 3) {
+                val (mappingGroup, mappingArtifact, versionPattern) = parts
+                if (mappingGroup == groupId && mappingArtifact == artifactId &&
+                    matchesVersionPattern(originalVersion, versionPattern)) {
+                    return targetVersion
+                }
+            }
+        }
+
+        // Priority 2: Exact group match (group:version)
+        for ((key, targetVersion) in versionMappings) {
+            val parts = key.split(":")
+            if (parts.size == 2) {
+                val (scope, versionPattern) = parts
+                if (!scope.endsWith(".*") && scope != "*" && scope == groupId &&
+                    matchesVersionPattern(originalVersion, versionPattern)) {
+                    return targetVersion
+                }
+            }
+        }
+
+        // Priority 3: Group pattern match (group.*:version)
+        for ((key, targetVersion) in versionMappings) {
+            val parts = key.split(":")
+            if (parts.size == 2) {
+                val (scope, versionPattern) = parts
+                if (scope.endsWith(".*") && matchesGroupPattern(groupId, scope) &&
+                    matchesVersionPattern(originalVersion, versionPattern)) {
+                    return targetVersion
+                }
+            }
+        }
+
+        // Priority 4: Global pattern (*:version)
+        for ((key, targetVersion) in versionMappings) {
+            val parts = key.split(":")
+            if (parts.size == 2 && parts[0] == "*" &&
+                matchesVersionPattern(originalVersion, parts[1])) {
+                return targetVersion
+            }
+        }
+
+        // Priority 5: Override
+        targetVersionOverride?.let { return it }
+
+        // Priority 6: Original
+        return originalVersion
+    }
+
+    private fun matchesVersionPattern(version: String, pattern: String): Boolean {
+        if (pattern == "*" || pattern == version) return true
+        if (pattern.endsWith(".*")) {
+            return version.startsWith("${pattern.dropLast(2)}.")
+        }
+        return false
+    }
+
+    private fun matchesGroupPattern(groupId: String, pattern: String): Boolean {
+        if (pattern == "*" || pattern == groupId) return true
+        if (pattern.endsWith(".*")) {
+            return groupId.startsWith("${pattern.dropLast(2)}.")
+        }
+        return false
+    }
+
+    fun normalizeMappings(mappings: Map<String, String>): Map<String, String> =
+        mappings.mapKeys { (key, _) -> if (!key.contains(":")) "*:$key" else key }
 }
 
 /**
@@ -140,71 +329,19 @@ object TvosArtifactMapping {
     private const val SOURCE_PREFIX = "org.jetbrains"
     private const val TARGET_PREFIX = "dev.sajidali"
 
-    /**
-     * Checks if the given module name is a tvOS artifact (case-insensitive).
-     * tvOS artifacts end with one of the tvOS target suffixes (e.g., ui-tvosArm64).
-     */
-    fun isTvosArtifact(moduleName: String): Boolean {
-        return TvosTargets.matchesTvosSuffix(moduleName)
-    }
+    fun isTvosArtifact(moduleName: String): Boolean =
+        TvosTargets.matchesTvosSuffix(moduleName)
 
-    /**
-     * Checks if the given module name is a non-tvOS platform-specific artifact.
-     */
-    fun isOtherPlatformArtifact(moduleName: String): Boolean {
-        return OtherPlatformSuffixes.ALL.any { suffix ->
-            moduleName.endsWith("-$suffix")
-        }
-    }
-
-    /**
-     * Checks if the given module name is an umbrella/common module (no platform suffix).
-     */
     fun isUmbrellaModule(moduleName: String): Boolean {
-        return !isTvosArtifact(moduleName) && !isOtherPlatformArtifact(moduleName)
+        val platformPatterns = listOf(
+            Regex("-(ios|tvos|macos|watchos|linux|mingw|android|jvm|js|wasm)[A-Za-z0-9_]*$", RegexOption.IGNORE_CASE),
+            Regex("-(desktop|native)$", RegexOption.IGNORE_CASE)
+        )
+        return platformPatterns.none { it.containsMatchIn(moduleName) }
     }
 
-    /**
-     * Checks if the given group ID is a JetBrains Compose group that should be redirected.
-     */
-    fun isComposeGroup(groupId: String): Boolean {
-        return groupId in ComposeModules.ALL
-    }
+    fun isComposeGroup(groupId: String): Boolean = groupId in ComposeModules.ALL
 
-    /**
-     * Maps a JetBrains Compose group ID to the corresponding dev.sajidali group.
-     * Example: org.jetbrains.compose.ui -> dev.sajidali.compose.ui
-     */
-    fun mapGroupId(sourceGroupId: String): String {
-        return sourceGroupId.replace(SOURCE_PREFIX, TARGET_PREFIX)
-    }
-
-    /**
-     * Determines if a dependency should be redirected based on group and module.
-     * Only redirects tvOS-specific artifacts.
-     */
-    fun shouldRedirect(groupId: String, moduleName: String): Boolean {
-        return isComposeGroup(groupId) && isTvosArtifact(moduleName)
-    }
-
-    /**
-     * Determines if a dependency should be redirected for tvOS support.
-     * Redirects:
-     * - tvOS-specific artifacts (e.g., ui-tvosarm64)
-     * - Umbrella/common modules (e.g., ui, foundation) - needed for tvOS variant resolution
-     * Does NOT redirect:
-     * - iOS, Android, Desktop, or other platform-specific artifacts
-     */
-    fun shouldRedirectForTvos(groupId: String, moduleName: String): Boolean {
-        if (!isComposeGroup(groupId)) return false
-
-        // Redirect tvOS artifacts
-        if (isTvosArtifact(moduleName)) return true
-
-        // Redirect umbrella modules (needed for tvOS variant resolution)
-        if (isUmbrellaModule(moduleName)) return true
-
-        // Don't redirect other platform-specific artifacts
-        return false
-    }
+    fun mapGroupId(sourceGroupId: String): String =
+        sourceGroupId.replace(SOURCE_PREFIX, TARGET_PREFIX)
 }

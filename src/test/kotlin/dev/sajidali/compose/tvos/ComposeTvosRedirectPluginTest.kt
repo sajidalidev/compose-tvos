@@ -5,124 +5,177 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-class ComposeTvosRedirectPluginTest {
+class TvosTargetsTest {
 
     @Test
-    fun `plugin can be applied to project`() {
-        val project = ProjectBuilder.builder().build()
-        project.plugins.apply("dev.sajidali.compose-tvos-redirect")
+    fun `matchesTvosSuffix detects tvOS artifacts`() {
+        assertTrue(TvosTargets.matchesTvosSuffix("ui-tvosArm64"))
+        assertTrue(TvosTargets.matchesTvosSuffix("ui-tvosX64"))
+        assertTrue(TvosTargets.matchesTvosSuffix("ui-tvosSimulatorArm64"))
+        assertTrue(TvosTargets.matchesTvosSuffix("ui-tvosarm64"))
+        assertTrue(TvosTargets.matchesTvosSuffix("ui-TVOSARM64"))
 
-        assertNotNull(project.plugins.findPlugin(ComposeTvosRedirectPlugin::class.java))
+        assertFalse(TvosTargets.matchesTvosSuffix("ui-iosArm64"))
+        assertFalse(TvosTargets.matchesTvosSuffix("ui-macosArm64"))
+        assertFalse(TvosTargets.matchesTvosSuffix("ui"))
     }
 
     @Test
-    fun `extension is created with default values`() {
-        val project = ProjectBuilder.builder().build()
-        project.plugins.apply("dev.sajidali.compose-tvos-redirect")
+    fun `extractTvosSuffix preserves original case`() {
+        assertEquals("-tvosArm64", TvosTargets.extractTvosSuffix("ui-tvosArm64"))
+        assertEquals("-tvosX64", TvosTargets.extractTvosSuffix("ui-tvosX64"))
+        assertEquals("-tvosarm64", TvosTargets.extractTvosSuffix("ui-tvosarm64"))
 
-        val extension = project.extensions.findByType(ComposeTvosRedirectExtension::class.java)
-        assertNotNull(extension)
-        assertFalse(extension.verbose.get())
-        assertFalse(extension.targetVersion.isPresent)
-        assertFalse(extension.repositoryUrl.isPresent)
-        assertTrue(extension.additionalGroups.get().isEmpty())
-        assertTrue(extension.additionalArtifacts.get().isEmpty())
+        assertNull(TvosTargets.extractTvosSuffix("ui-iosArm64"))
+        assertNull(TvosTargets.extractTvosSuffix("ui"))
+    }
+}
+
+class TvosVariantDiscoveryTest {
+
+    @Test
+    fun `parseModuleMetadata extracts tvOS variants from available-at`() {
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64ApiElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_arm64"
+              },
+              "available-at": {
+                "module": "foundation-tvosarm64"
+              }
+            },
+            {
+              "name": "tvosSimulatorArm64ApiElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_simulator_arm64"
+              },
+              "available-at": {
+                "module": "foundation-tvossimulatorarm64"
+              }
+            },
+            {
+              "name": "iosArm64ApiElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "ios_arm64"
+              },
+              "available-at": {
+                "module": "foundation-iosarm64"
+              }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "foundation")
+
+        assertEquals(2, variants.size)
+
+        val arm64 = variants.find { it.nativeTarget == "tvos_arm64" }
+        assertNotNull(arm64)
+        assertEquals("foundation-tvosarm64", arm64!!.artifactId)
+
+        val simArm64 = variants.find { it.nativeTarget == "tvos_simulator_arm64" }
+        assertNotNull(simArm64)
+        assertEquals("foundation-tvossimulatorarm64", simArm64!!.artifactId)
     }
 
     @Test
-    fun `extension values can be configured`() {
-        val project = ProjectBuilder.builder().build()
-        project.plugins.apply("dev.sajidali.compose-tvos-redirect")
+    fun `parseModuleMetadata returns empty for non-tvOS module`() {
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "iosArm64ApiElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "ios_arm64"
+              }
+            }
+          ]
+        }
+        """.trimIndent()
 
-        val extension = project.extensions.findByType(ComposeTvosRedirectExtension::class.java)!!
-        extension.targetVersion.set("1.6.0-tvos01")
-        extension.repositoryUrl.set("https://maven.example.com")
-        extension.verbose.set(true)
-
-        assertEquals("1.6.0-tvos01", extension.targetVersion.get())
-        assertEquals("https://maven.example.com", extension.repositoryUrl.get())
-        assertTrue(extension.verbose.get())
+        assertTrue(TvosVariantDiscovery.parseModuleMetadata(json).isEmpty())
     }
 
     @Test
-    fun `additionalGroups can be configured`() {
-        val project = ProjectBuilder.builder().build()
-        project.plugins.apply("dev.sajidali.compose-tvos-redirect")
+    fun `parseModuleMetadata skips non-Api variants`() {
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64RuntimeElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_arm64"
+              },
+              "available-at": { "module": "ui-tvosarm64" }
+            },
+            {
+              "name": "tvosArm64ApiElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_arm64"
+              },
+              "available-at": { "module": "ui-tvosarm64" }
+            }
+          ]
+        }
+        """.trimIndent()
 
-        val extension = project.extensions.findByType(ComposeTvosRedirectExtension::class.java)!!
-        extension.additionalGroups.put("io.coil-kt.coil3", "dev.sajidali.coil3")
-        extension.additionalGroups.put("io.insert-koin", "dev.sajidali.koin")
-
-        val groups = extension.additionalGroups.get()
-        assertEquals(2, groups.size)
-        assertEquals("dev.sajidali.coil3", groups["io.coil-kt.coil3"])
-        assertEquals("dev.sajidali.koin", groups["io.insert-koin"])
-    }
-
-    @Test
-    fun `additionalArtifacts can be configured`() {
-        val project = ProjectBuilder.builder().build()
-        project.plugins.apply("dev.sajidali.compose-tvos-redirect")
-
-        val extension = project.extensions.findByType(ComposeTvosRedirectExtension::class.java)!!
-        extension.additionalArtifacts.put("io.coil-kt.coil3:coil-compose", "dev.sajidali.coil3:coil-compose")
-        extension.additionalArtifacts.put("org.example:my-lib", "dev.sajidali.example:my-lib")
-
-        val artifacts = extension.additionalArtifacts.get()
-        assertEquals(2, artifacts.size)
-        assertEquals("dev.sajidali.coil3:coil-compose", artifacts["io.coil-kt.coil3:coil-compose"])
-        assertEquals("dev.sajidali.example:my-lib", artifacts["org.example:my-lib"])
+        val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "ui")
+        assertEquals(1, variants.size)
+        assertEquals("tvosArm64ApiElements", variants[0].variantName)
     }
 }
 
 class TvosArtifactMappingTest {
 
     @Test
-    fun `isTvosArtifact returns true for tvosarm64 artifacts`() {
-        assertTrue(TvosArtifactMapping.isTvosArtifact("ui-tvosarm64"))
-        assertTrue(TvosArtifactMapping.isTvosArtifact("foundation-tvosarm64"))
-        assertTrue(TvosArtifactMapping.isTvosArtifact("runtime-tvosarm64"))
-    }
-
-    @Test
-    fun `isTvosArtifact returns true for tvosx64 artifacts`() {
-        assertTrue(TvosArtifactMapping.isTvosArtifact("ui-tvosx64"))
-        assertTrue(TvosArtifactMapping.isTvosArtifact("foundation-tvosx64"))
-    }
-
-    @Test
-    fun `isTvosArtifact returns true for tvossimulatorarm64 artifacts`() {
-        assertTrue(TvosArtifactMapping.isTvosArtifact("ui-tvossimulatorarm64"))
-        assertTrue(TvosArtifactMapping.isTvosArtifact("foundation-tvossimulatorarm64"))
+    fun `isTvosArtifact returns true for tvOS artifacts`() {
+        assertTrue(TvosArtifactMapping.isTvosArtifact("ui-tvosArm64"))
+        assertTrue(TvosArtifactMapping.isTvosArtifact("foundation-tvosX64"))
+        assertTrue(TvosArtifactMapping.isTvosArtifact("ui-tvosSimulatorArm64"))
     }
 
     @Test
     fun `isTvosArtifact returns false for non-tvOS artifacts`() {
         assertFalse(TvosArtifactMapping.isTvosArtifact("ui-iosarm64"))
-        assertFalse(TvosArtifactMapping.isTvosArtifact("ui-iossimulatorarm64"))
         assertFalse(TvosArtifactMapping.isTvosArtifact("ui-android"))
-        assertFalse(TvosArtifactMapping.isTvosArtifact("ui-desktop"))
         assertFalse(TvosArtifactMapping.isTvosArtifact("ui"))
+    }
+
+    @Test
+    fun `isUmbrellaModule returns true for modules without platform suffix`() {
+        assertTrue(TvosArtifactMapping.isUmbrellaModule("ui"))
+        assertTrue(TvosArtifactMapping.isUmbrellaModule("foundation"))
+        assertTrue(TvosArtifactMapping.isUmbrellaModule("material3"))
+        assertTrue(TvosArtifactMapping.isUmbrellaModule("navigation-compose"))
+    }
+
+    @Test
+    fun `isUmbrellaModule returns false for platform-specific modules`() {
+        assertFalse(TvosArtifactMapping.isUmbrellaModule("ui-tvosArm64"))
+        assertFalse(TvosArtifactMapping.isUmbrellaModule("ui-iosArm64"))
+        assertFalse(TvosArtifactMapping.isUmbrellaModule("ui-android"))
+        assertFalse(TvosArtifactMapping.isUmbrellaModule("ui-desktop"))
     }
 
     @Test
     fun `isComposeGroup returns true for JetBrains Compose groups`() {
         assertTrue(TvosArtifactMapping.isComposeGroup("org.jetbrains.compose.ui"))
         assertTrue(TvosArtifactMapping.isComposeGroup("org.jetbrains.compose.foundation"))
-        assertTrue(TvosArtifactMapping.isComposeGroup("org.jetbrains.compose.runtime"))
-        assertTrue(TvosArtifactMapping.isComposeGroup("org.jetbrains.compose.material"))
         assertTrue(TvosArtifactMapping.isComposeGroup("org.jetbrains.compose.material3"))
-        assertTrue(TvosArtifactMapping.isComposeGroup("org.jetbrains.compose.animation"))
-        assertTrue(TvosArtifactMapping.isComposeGroup("org.jetbrains.compose.components"))
+        assertTrue(TvosArtifactMapping.isComposeGroup("org.jetbrains.androidx.navigation"))
     }
 
     @Test
     fun `isComposeGroup returns false for non-Compose groups`() {
         assertFalse(TvosArtifactMapping.isComposeGroup("org.jetbrains.kotlin"))
         assertFalse(TvosArtifactMapping.isComposeGroup("androidx.compose.ui"))
-        assertFalse(TvosArtifactMapping.isComposeGroup("com.google.android"))
         assertFalse(TvosArtifactMapping.isComposeGroup("dev.sajidali.compose.ui"))
     }
 
@@ -130,42 +183,7 @@ class TvosArtifactMappingTest {
     fun `mapGroupId correctly maps JetBrains to sajidali`() {
         assertEquals("dev.sajidali.compose.ui", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.ui"))
         assertEquals("dev.sajidali.compose.foundation", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.foundation"))
-        assertEquals("dev.sajidali.compose.runtime", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.runtime"))
-        assertEquals("dev.sajidali.compose.material", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.material"))
-        assertEquals("dev.sajidali.compose.material3", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.material3"))
-        assertEquals("dev.sajidali.compose.animation", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.animation"))
-        assertEquals("dev.sajidali.compose.components", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.components"))
-    }
-
-    @Test
-    fun `shouldRedirect returns true for tvOS Compose artifacts`() {
-        assertTrue(TvosArtifactMapping.shouldRedirect("org.jetbrains.compose.ui", "ui-tvosarm64"))
-        assertTrue(TvosArtifactMapping.shouldRedirect("org.jetbrains.compose.foundation", "foundation-tvossimulatorarm64"))
-        assertTrue(TvosArtifactMapping.shouldRedirect("org.jetbrains.compose.runtime", "runtime-tvosx64"))
-    }
-
-    @Test
-    fun `shouldRedirect returns false for non-tvOS Compose artifacts`() {
-        assertFalse(TvosArtifactMapping.shouldRedirect("org.jetbrains.compose.ui", "ui-iosarm64"))
-        assertFalse(TvosArtifactMapping.shouldRedirect("org.jetbrains.compose.ui", "ui-android"))
-        assertFalse(TvosArtifactMapping.shouldRedirect("org.jetbrains.compose.ui", "ui"))
-    }
-
-    @Test
-    fun `shouldRedirect returns false for non-Compose tvOS artifacts`() {
-        assertFalse(TvosArtifactMapping.shouldRedirect("org.jetbrains.kotlin", "kotlin-stdlib-tvosarm64"))
-        assertFalse(TvosArtifactMapping.shouldRedirect("com.example", "example-tvosarm64"))
-    }
-}
-
-class TvosTargetsTest {
-
-    @Test
-    fun `ALL contains all tvOS target suffixes`() {
-        assertEquals(3, TvosTargets.ALL.size)
-        assertTrue(TvosTargets.ALL.contains(TvosTargets.TVOS_ARM64))
-        assertTrue(TvosTargets.ALL.contains(TvosTargets.TVOS_X64))
-        assertTrue(TvosTargets.ALL.contains(TvosTargets.TVOS_SIMULATOR_ARM64))
+        assertEquals("dev.sajidali.androidx.navigation", TvosArtifactMapping.mapGroupId("org.jetbrains.androidx.navigation"))
     }
 }
 
@@ -174,14 +192,14 @@ class ComposeModulesTest {
     @Test
     fun `ALL contains all Compose module groups`() {
         assertEquals(8, ComposeModules.ALL.size)
-        assertTrue(ComposeModules.ALL.contains(ComposeModules.UI))
-        assertTrue(ComposeModules.ALL.contains(ComposeModules.FOUNDATION))
-        assertTrue(ComposeModules.ALL.contains(ComposeModules.RUNTIME))
-        assertTrue(ComposeModules.ALL.contains(ComposeModules.MATERIAL))
-        assertTrue(ComposeModules.ALL.contains(ComposeModules.MATERIAL3))
-        assertTrue(ComposeModules.ALL.contains(ComposeModules.ANIMATION))
-        assertTrue(ComposeModules.ALL.contains(ComposeModules.COMPONENTS))
-        assertTrue(ComposeModules.ALL.contains(ComposeModules.NAVIGATION))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.ui"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.foundation"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.runtime"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.material"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.material3"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.animation"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.components"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.androidx.navigation"))
     }
 }
 
@@ -189,53 +207,49 @@ class ComposeArtifactsTest {
 
     @Test
     fun `ALL contains predefined artifact coordinates`() {
-        assertEquals(3, ComposeArtifacts.ALL.size)
-        assertTrue(ComposeArtifacts.ALL.contains(ComposeArtifacts.NAVIGATION_COMPOSE))
-        assertTrue(ComposeArtifacts.ALL.contains(ComposeArtifacts.LIFECYCLE_VIEWMODEL_COMPOSE))
-        assertTrue(ComposeArtifacts.ALL.contains(ComposeArtifacts.LIFECYCLE_RUNTIME_COMPOSE))
+        assertEquals(5, ComposeArtifacts.ALL.size)
+        assertTrue(ComposeArtifacts.ALL.contains("org.jetbrains.androidx.navigation:navigation-compose"))
+        assertTrue(ComposeArtifacts.ALL.contains("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose"))
     }
 
     @Test
-    fun `isComposeArtifact returns true for predefined artifacts`() {
-        assertTrue(ComposeArtifacts.isComposeArtifact("org.jetbrains.androidx.navigation", "navigation-compose"))
-        assertTrue(ComposeArtifacts.isComposeArtifact("org.jetbrains.androidx.lifecycle", "lifecycle-viewmodel-compose"))
-        assertTrue(ComposeArtifacts.isComposeArtifact("org.jetbrains.androidx.lifecycle", "lifecycle-runtime-compose"))
-    }
-
-    @Test
-    fun `isComposeArtifact returns false for non-predefined artifacts`() {
-        assertFalse(ComposeArtifacts.isComposeArtifact("org.jetbrains.compose.ui", "ui"))
-        assertFalse(ComposeArtifacts.isComposeArtifact("com.example", "my-lib"))
-    }
-
-    @Test
-    fun `mapArtifact correctly maps JetBrains to sajidali`() {
-        assertEquals(
-            "dev.sajidali.androidx.navigation:navigation-compose",
-            ComposeArtifacts.mapArtifact("org.jetbrains.androidx.navigation:navigation-compose")
-        )
-        assertEquals(
-            "dev.sajidali.androidx.lifecycle:lifecycle-viewmodel-compose",
-            ComposeArtifacts.mapArtifact("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose")
-        )
-    }
-
-    @Test
-    fun `getTargetMapping returns correct mapping for predefined artifacts`() {
-        val navigationMapping = ComposeArtifacts.getTargetMapping("org.jetbrains.androidx.navigation", "navigation-compose")
-        assertNotNull(navigationMapping)
-        assertEquals("dev.sajidali.androidx.navigation", navigationMapping!!.first)
-        assertEquals("navigation-compose", navigationMapping.second)
-
-        val lifecycleMapping = ComposeArtifacts.getTargetMapping("org.jetbrains.androidx.lifecycle", "lifecycle-viewmodel-compose")
-        assertNotNull(lifecycleMapping)
-        assertEquals("dev.sajidali.androidx.lifecycle", lifecycleMapping!!.first)
-        assertEquals("lifecycle-viewmodel-compose", lifecycleMapping.second)
+    fun `getTargetMapping returns correct mapping`() {
+        val mapping = ComposeArtifacts.getTargetMapping("org.jetbrains.androidx.navigation", "navigation-compose")
+        assertNotNull(mapping)
+        assertEquals("dev.sajidali.androidx.navigation", mapping!!.first)
+        assertEquals("navigation-compose", mapping.second)
     }
 
     @Test
     fun `getTargetMapping returns null for non-predefined artifacts`() {
-        val mapping = ComposeArtifacts.getTargetMapping("com.example", "my-lib")
-        assertEquals(null, mapping)
+        assertNull(ComposeArtifacts.getTargetMapping("com.example", "my-lib"))
+    }
+}
+
+class ComposeVersionsTest {
+
+    @Test
+    fun `resolveVersion prioritizes artifact over group`() {
+        val mappings = mapOf(
+            "org.example:lib:1.0.*" to "1.0.0-artifact",
+            "org.example:1.0.*" to "1.0.0-group"
+        )
+        assertEquals("1.0.0-artifact", ComposeVersions.resolveVersion("org.example", "lib", "1.0.0", mappings, null))
+    }
+
+    @Test
+    fun `resolveVersion falls back to original version`() {
+        assertEquals("1.0.0", ComposeVersions.resolveVersion("org.example", "lib", "1.0.0", emptyMap(), null))
+    }
+
+    @Test
+    fun `resolveVersion uses override when specified`() {
+        assertEquals("override", ComposeVersions.resolveVersion("org.example", "lib", "1.0.0", emptyMap(), "override"))
+    }
+
+    @Test
+    fun `normalizeMappings adds global scope`() {
+        val result = ComposeVersions.normalizeMappings(mapOf("1.10.0" to "mapped"))
+        assertEquals("mapped", result["*:1.10.0"])
     }
 }

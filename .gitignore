@@ -1,4 +1,28 @@
-/build/
-/.gradle/
-/demo/.gradle/
-/demo/build/
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local configuration
+local.properties
+gradle.properties.local
+
+# Kotlin
+*.class
+*.log
+*.ctxt
+.mtj.tmp/
+
+# Test output
+test-output/
