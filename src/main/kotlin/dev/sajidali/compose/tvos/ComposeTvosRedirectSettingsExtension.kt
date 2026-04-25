@@ -41,6 +41,17 @@ abstract class ComposeTvosRedirectSettingsExtension @Inject constructor(
     val repositoryUrl: Property<String> = objects.property(String::class.java)
 
     /**
+     * URL of the version override manifest. The plugin defaults the unmapped case to
+     * the original requested version (same-version convention), so this manifest only
+     * needs to list exceptions where the tvOS fork is published at a different version
+     * than upstream (e.g. material3 alpha tracks).
+     *
+     * Set to an empty string to disable manifest fetching entirely.
+     */
+    val manifestUrl: Property<String> = objects.property(String::class.java)
+        .convention("https://raw.githubusercontent.com/sajidalidev/compose-tvos/main/manifest/compose-tvos-versions.json")
+
+    /**
      * Additional library groups to redirect for tvOS support.
      * Maps source group ID to target group ID.
      *

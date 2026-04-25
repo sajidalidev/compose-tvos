@@ -1,5 +1,6 @@
 plugins {
     alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlin.serialization)
     `java-gradle-plugin`
     alias(libs.plugins.maven.publish)
     alias(libs.plugins.plugin.publish)
@@ -20,6 +21,7 @@ kotlin {
 dependencies {
     implementation(gradleApi())
     implementation(gradleKotlinDsl())
+    implementation(libs.kotlinx.serialization.json)
 
     testImplementation(gradleTestKit())
     testImplementation(kotlin("test"))

@@ -292,16 +292,12 @@ object ComposeArtifacts {
 
 /**
  * Version pattern matching and mapping.
+ *
+ * Resolution falls through to the original requested version when no entry matches —
+ * that's the same-version convention. Override exceptions live in the remote manifest
+ * loaded by [VersionManifestLoader], not in code.
  */
 object ComposeVersions {
-    val ALL: Map<String, String> = mapOf(
-        "org.jetbrains.compose.*:1.10.*" to "1.10.0",
-        "org.jetbrains.compose.material3:1.10.*" to "1.10.0-alpha05",
-        "org.jetbrains.androidx.lifecycle:2.9.*" to "2.10.0-alpha06",
-        "org.jetbrains.androidx.navigation:2.9.*" to "2.9.1",
-        "org.jetbrains.androidx.navigation3:1.0.*" to "1.0.0-alpha06",
-        "org.jetbrains.androidx.savedstate:1.4.*" to "1.4.0",
-    )
 
     fun resolveVersion(
         groupId: String,

@@ -68,8 +68,9 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
             }
         }
 
+        // User mappings overwrite manifest mappings on key collision (later putAll wins).
         val allVersionMappings = mutableMapOf<String, String>()
-        allVersionMappings.putAll(ComposeVersions.normalizeMappings(ComposeVersions.ALL))
+        allVersionMappings.putAll(ComposeVersions.normalizeMappings(config.manifestMappings))
         allVersionMappings.putAll(ComposeVersions.normalizeMappings(config.versionMappings))
 
         project.configurations.all { configuration ->

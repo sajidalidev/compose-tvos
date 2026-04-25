@@ -37,14 +37,21 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         settings.gradle.settingsEvaluated { evaluatedSettings ->
             val verbose = extension.verbose.get()
             val repositoryUrls = collectRepositoryUrls(evaluatedSettings, extension)
+            val manifestMappings = VersionManifestLoader.load(
+                manifestUrl = extension.manifestUrl.orNull,
+                cacheDir = File(System.getProperty("user.home"), ".gradle"),
+                refreshDependencies = evaluatedSettings.gradle.startParameter.isRefreshDependencies,
+                logger = if (verbose) logger else null
+            )
 
             if (verbose) {
                 logger.lifecycle("[ComposeTvosRedirect] Settings plugin applied")
                 logger.lifecycle("[ComposeTvosRedirect] Found ${repositoryUrls.size} repositories")
                 repositoryUrls.forEach { logger.lifecycle("[ComposeTvosRedirect]   - $it") }
+                logger.lifecycle("[ComposeTvosRedirect] Loaded ${manifestMappings.size} version override(s) from manifest")
             }
 
-            configureComponentMetadataRules(evaluatedSettings, extension, repositoryUrls)
+            configureComponentMetadataRules(evaluatedSettings, extension, repositoryUrls, manifestMappings)
 
             val config = PluginConfiguration(
                 verbose = extension.verbose.get(),
@@ -52,6 +59,7 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
                 additionalGroups = extension.additionalGroups.get(),
                 additionalArtifacts = extension.additionalArtifacts.get(),
                 versionMappings = extension.versionMappings.get(),
+                manifestMappings = manifestMappings,
                 repositoryUrls = repositoryUrls
             )
 
@@ -89,15 +97,17 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
     private fun configureComponentMetadataRules(
         settings: Settings,
         extension: ComposeTvosRedirectSettingsExtension,
-        repositoryUrls: List<String>
+        repositoryUrls: List<String>,
+        manifestMappings: Map<String, String>
     ) {
         val verbose = extension.verbose.get()
         val targetVersionOverride = extension.targetVersion.orNull
         val additionalGroups = extension.additionalGroups.get()
         val additionalArtifacts = extension.additionalArtifacts.get()
 
+        // User mappings overwrite manifest mappings on key collision (later putAll wins).
         val versionMappings = mutableMapOf<String, String>()
-        versionMappings.putAll(ComposeVersions.normalizeMappings(ComposeVersions.ALL))
+        versionMappings.putAll(ComposeVersions.normalizeMappings(manifestMappings))
         versionMappings.putAll(ComposeVersions.normalizeMappings(extension.versionMappings.get()))
 
         val cacheDir = File(System.getProperty("user.home"), ".gradle")
@@ -246,5 +256,6 @@ data class PluginConfiguration(
     val additionalGroups: Map<String, String>,
     val additionalArtifacts: Map<String, String>,
     val versionMappings: Map<String, String>,
+    val manifestMappings: Map<String, String>,
     val repositoryUrls: List<String>
 ) : java.io.Serializable

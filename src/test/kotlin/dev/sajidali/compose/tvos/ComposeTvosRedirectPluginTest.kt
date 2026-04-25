@@ -281,8 +281,12 @@ class ComposeVersionsTest {
     }
 
     @Test
-    fun `resolveVersion falls back to original version`() {
-        assertEquals("1.0.0", ComposeVersions.resolveVersion("org.example", "lib", "1.0.0", emptyMap(), null))
+    fun `resolveVersion falls back to original version (same-version convention)`() {
+        // No mapping entry → return what was requested. This is the convention that lets
+        // the plugin survive new Compose releases without a code change.
+        assertEquals("1.10.5", ComposeVersions.resolveVersion(
+            "org.jetbrains.compose.ui", "ui", "1.10.5", emptyMap(), null
+        ))
     }
 
     @Test
@@ -291,8 +295,75 @@ class ComposeVersionsTest {
     }
 
     @Test
+    fun `user mapping overrides manifest mapping on same key`() {
+        // Mirrors what the settings/project plugins do: putAll manifest, then putAll user.
+        // User entry wins on key collision.
+        val manifest = ComposeVersions.normalizeMappings(mapOf(
+            "org.jetbrains.compose.material3:1.10.*" to "1.10.0-alpha05"
+        ))
+        val user = ComposeVersions.normalizeMappings(mapOf(
+            "org.jetbrains.compose.material3:1.10.*" to "1.10.0-rc01"
+        ))
+        val merged = mutableMapOf<String, String>().apply {
+            putAll(manifest)
+            putAll(user)
+        }
+        assertEquals("1.10.0-rc01", ComposeVersions.resolveVersion(
+            "org.jetbrains.compose.material3", "material3", "1.10.3", merged, null
+        ))
+    }
+
+    @Test
     fun `normalizeMappings adds global scope`() {
         val result = ComposeVersions.normalizeMappings(mapOf("1.10.0" to "mapped"))
         assertEquals("mapped", result["*:1.10.0"])
+    }
+}
+
+class VersionManifestLoaderTest {
+
+    @Test
+    fun `parse extracts mappings from valid manifest`() {
+        val json = """
+        {
+          "schema": 1,
+          "mappings": {
+            "org.jetbrains.compose.material3:1.10.*": "1.10.0-alpha05",
+            "org.jetbrains.androidx.lifecycle:2.9.*": "2.10.0-alpha06"
+          }
+        }
+        """.trimIndent()
+
+        val mappings = VersionManifestLoader.parse(json, null)
+        assertNotNull(mappings)
+        assertEquals(2, mappings!!.size)
+        assertEquals("1.10.0-alpha05", mappings["org.jetbrains.compose.material3:1.10.*"])
+    }
+
+    @Test
+    fun `parse tolerates unknown top-level fields`() {
+        val json = """
+        {
+          "schema": 1,
+          "_comment": "human-readable note",
+          "futureField": ["whatever"],
+          "mappings": {"a:1.*": "1.0"}
+        }
+        """.trimIndent()
+        val mappings = VersionManifestLoader.parse(json, null)
+        assertNotNull(mappings)
+        assertEquals("1.0", mappings!!["a:1.*"])
+    }
+
+    @Test
+    fun `parse returns null for malformed JSON`() {
+        assertNull(VersionManifestLoader.parse("{not json", null))
+    }
+
+    @Test
+    fun `parse returns empty map for missing mappings field`() {
+        val mappings = VersionManifestLoader.parse("""{"schema": 1}""", null)
+        assertNotNull(mappings)
+        assertTrue(mappings!!.isEmpty())
     }
 }
