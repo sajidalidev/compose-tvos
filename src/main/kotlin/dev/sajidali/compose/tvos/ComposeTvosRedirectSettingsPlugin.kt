@@ -200,22 +200,30 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         variants.forEach { variant ->
             metadata.addVariant("${variant.variantName}-injected") { variantMetadata ->
                 variantMetadata.attributes { attrs ->
-                    attrs.attribute(
-                        org.gradle.api.attributes.Attribute.of("org.gradle.category", String::class.java),
-                        "library"
-                    )
-                    attrs.attribute(
-                        org.gradle.api.attributes.Attribute.of("org.gradle.usage", String::class.java),
-                        "kotlin-api"
-                    )
-                    attrs.attribute(
-                        org.gradle.api.attributes.Attribute.of("org.jetbrains.kotlin.platform.type", String::class.java),
-                        "native"
-                    )
-                    attrs.attribute(
-                        org.gradle.api.attributes.Attribute.of("org.jetbrains.kotlin.native.target", String::class.java),
-                        variant.nativeTarget
-                    )
+                    val attributesToApply = if (variant.attributes.isNotEmpty()) {
+                        variant.attributes
+                    } else {
+                        // Fallback for cache entries predating attribute capture. This
+                        // covers the common kotlin-api request path but does NOT cover
+                        // metadata / sources / runtime variant lookups — if a consumer
+                        // reports unresolved references in a shared source set (e.g.
+                        // `appleMain`) after upgrading, deleting the cache directory
+                        // (~/.gradle/compose-tvos-redirect-cache-v2/) forces re-discovery
+                        // with the full attribute set.
+                        mapOf(
+                            "org.gradle.category" to "library",
+                            "org.gradle.usage" to "kotlin-api",
+                            "org.gradle.jvm.environment" to "non-jvm",
+                            "org.jetbrains.kotlin.platform.type" to "native",
+                            "org.jetbrains.kotlin.native.target" to variant.nativeTarget
+                        )
+                    }
+                    attributesToApply.forEach { (key, value) ->
+                        attrs.attribute(
+                            org.gradle.api.attributes.Attribute.of(key, String::class.java),
+                            value
+                        )
+                    }
                 }
                 variantMetadata.withDependencies { deps ->
                     deps.add("$targetGroup:${variant.artifactId}:$version")

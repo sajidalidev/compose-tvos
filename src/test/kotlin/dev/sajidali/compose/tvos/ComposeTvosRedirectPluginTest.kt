@@ -104,7 +104,10 @@ class TvosVariantDiscoveryTest {
     }
 
     @Test
-    fun `parseModuleMetadata skips non-Api variants`() {
+    fun `parseModuleMetadata keeps all variant kinds per target`() {
+        // Mirror each source variant (api, sources, metadata, runtime) onto the upstream
+        // umbrella — otherwise consumers resolving kotlin-metadata / kotlin-runtime /
+        // docs-type=sources requests on the tvOS target silently miss the fork's artifact.
         val json = """
         {
           "variants": [
@@ -121,6 +124,41 @@ class TvosVariantDiscoveryTest {
                 "org.jetbrains.kotlin.native.target": "tvos_arm64"
               },
               "available-at": { "module": "ui-tvosarm64" }
+            },
+            {
+              "name": "tvosArm64MetadataElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_arm64"
+              },
+              "available-at": { "module": "ui-tvosarm64" }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "ui")
+        assertEquals(3, variants.size)
+        assertTrue(variants.any { it.variantName == "tvosArm64ApiElements" })
+        assertTrue(variants.any { it.variantName == "tvosArm64RuntimeElements" })
+        assertTrue(variants.any { it.variantName == "tvosArm64MetadataElements" })
+    }
+
+    @Test
+    fun `parseModuleMetadata captures the full attribute map per variant`() {
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64ApiElements",
+              "attributes": {
+                "artifactType": "org.jetbrains.kotlin.klib",
+                "org.gradle.category": "library",
+                "org.gradle.jvm.environment": "non-jvm",
+                "org.gradle.usage": "kotlin-api",
+                "org.jetbrains.kotlin.native.target": "tvos_arm64",
+                "org.jetbrains.kotlin.platform.type": "native"
+              },
+              "available-at": { "module": "ui-tvosarm64" }
             }
           ]
         }
@@ -128,7 +166,12 @@ class TvosVariantDiscoveryTest {
 
         val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "ui")
         assertEquals(1, variants.size)
-        assertEquals("tvosArm64ApiElements", variants[0].variantName)
+        val attrs = variants[0].attributes
+        assertEquals("library", attrs["org.gradle.category"])
+        assertEquals("kotlin-api", attrs["org.gradle.usage"])
+        assertEquals("non-jvm", attrs["org.gradle.jvm.environment"])
+        assertEquals("tvos_arm64", attrs["org.jetbrains.kotlin.native.target"])
+        assertEquals("native", attrs["org.jetbrains.kotlin.platform.type"])
     }
 }
 

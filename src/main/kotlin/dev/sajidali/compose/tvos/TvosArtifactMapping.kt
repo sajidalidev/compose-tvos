@@ -8,11 +8,20 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Represents a discovered tvOS variant from module metadata.
+ *
+ * @param attributes Full Gradle attribute map (org.gradle.category, org.gradle.usage,
+ * org.gradle.jvm.environment, org.gradle.libraryelements, org.gradle.docstype,
+ * org.jetbrains.kotlin.platform.type, org.jetbrains.kotlin.native.target, etc.) parsed
+ * from the source variant. Mirrored onto the injected variant so Kotlin's metadata
+ * transformer can match it for all source-set compile paths (api, metadata, runtime,
+ * sources) — not just the api request. Empty map means the cache pre-dates this field
+ * and a degraded-but-functional default set is used at injection time.
  */
 data class TvosVariant(
     val variantName: String,
     val nativeTarget: String,
-    val artifactId: String
+    val artifactId: String,
+    val attributes: Map<String, String> = emptyMap()
 )
 
 /**
@@ -35,7 +44,10 @@ object TvosTargets {
  */
 object TvosVariantDiscovery {
     private val variantCache = ConcurrentHashMap<String, List<TvosVariant>>()
-    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache"
+    // v2: cache entries now include the full attribute map per variant. Old v1 caches
+    // (3-field pipe-separated lines) are ignored rather than migrated — a single cold
+    // network fetch repopulates v2.
+    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache-v2"
 
     fun discoverVariants(
         repositoryUrls: List<String>,
@@ -130,6 +142,8 @@ object TvosVariantDiscovery {
         val nativeTargetPattern = Regex(""""org\.jetbrains\.kotlin\.native\.target"\s*:\s*"(tvos_[^"]+)"""")
         val availableAtModulePattern = Regex(""""available-at"\s*:\s*\{[^}]*"module"\s*:\s*"([^"]+)"""", RegexOption.DOT_MATCHES_ALL)
         val namePattern = Regex(""""name"\s*:\s*"([^"]+)"""")
+        val attributesBlockPattern = Regex(""""attributes"\s*:\s*\{([^}]*)\}""", RegexOption.DOT_MATCHES_ALL)
+        val attributePairPattern = Regex(""""([^"]+)"\s*:\s*"([^"]+)"""")
 
         val tvosSections = json.split(Regex("""(?=\{\s*"name"\s*:)""")).filter { it.contains("tvos_") }
 
@@ -137,10 +151,21 @@ object TvosVariantDiscovery {
             val nameMatch = namePattern.find(section) ?: continue
             val variantName = nameMatch.groupValues[1]
 
-            if (!variantName.contains("Api", ignoreCase = true)) continue
-
             val targetMatch = nativeTargetPattern.find(section) ?: continue
             val nativeTarget = targetMatch.groupValues[1]
+
+            // Capture the full attribute block for this variant. The earlier "Api-only"
+            // filter and distinctBy(nativeTarget) produced a single injected variant with
+            // four attributes, which covered kotlin-api requests but silently failed for
+            // consumers whose source-set resolution needed kotlin-metadata / kotlin-runtime
+            // / sources variants (e.g. `appleMain` compileMainKotlinMetadata).
+            // We now mirror every tvOS variant from the fork with its exact attribute set.
+            val attributes = attributesBlockPattern.find(section)
+                ?.let { blockMatch ->
+                    attributePairPattern.findAll(blockMatch.groupValues[1])
+                        .associate { it.groupValues[1] to it.groupValues[2] }
+                }
+                ?: emptyMap()
 
             val availableAtMatch = availableAtModulePattern.find(section)
             val moduleArtifactId = if (availableAtMatch != null) {
@@ -152,21 +177,46 @@ object TvosVariantDiscovery {
                 nativeTarget.replace("_", "")
             }
 
-            variants.add(TvosVariant(variantName, nativeTarget, moduleArtifactId))
+            variants.add(TvosVariant(variantName, nativeTarget, moduleArtifactId, attributes))
         }
 
-        return variants.distinctBy { it.nativeTarget }
+        // Keep every (name, target) pair — api / sources / metadata / runtime all needed.
+        return variants.distinctBy { it.variantName }
     }
 
+    // Cache format (v2): two lines per variant.
+    //   header: variantName|nativeTarget|artifactId
+    //   attrs:  attrs:key1=value1,key2=value2,...
+    // Attribute keys/values are Gradle attribute names and enum-like strings (no commas/
+    // pipes/equals), so naive delimiting is safe. A malformed file is simply ignored and
+    // the variants are re-fetched from the network.
     private fun readFromFileCache(cacheDir: File, cacheKey: String): List<TvosVariant>? {
         val cacheFile = getCacheFile(cacheDir, cacheKey)
         if (!cacheFile.exists()) return null
 
         return try {
-            cacheFile.readLines().mapNotNull { line ->
-                val parts = line.split("|")
-                if (parts.size == 3) TvosVariant(parts[0], parts[1], parts[2]) else null
+            val lines = cacheFile.readLines()
+            val result = mutableListOf<TvosVariant>()
+            var i = 0
+            while (i < lines.size) {
+                val header = lines[i].split("|")
+                if (header.size != 3) { i++; continue }
+                val attrsLine = lines.getOrNull(i + 1).orEmpty()
+                val attributes = if (attrsLine.startsWith("attrs:")) {
+                    attrsLine.removePrefix("attrs:")
+                        .split(",")
+                        .mapNotNull {
+                            val eq = it.indexOf('=')
+                            if (eq > 0) it.substring(0, eq) to it.substring(eq + 1) else null
+                        }
+                        .toMap()
+                } else {
+                    emptyMap()
+                }
+                result.add(TvosVariant(header[0], header[1], header[2], attributes))
+                i += 2
             }
+            result.takeIf { it.isNotEmpty() }
         } catch (e: Exception) {
             null
         }
@@ -176,7 +226,17 @@ object TvosVariantDiscovery {
         val cacheFile = getCacheFile(cacheDir, cacheKey)
         try {
             cacheFile.parentFile?.mkdirs()
-            cacheFile.writeText(variants.joinToString("\n") { "${it.variantName}|${it.nativeTarget}|${it.artifactId}" })
+            val text = buildString {
+                variants.forEach { v ->
+                    append(v.variantName).append('|')
+                        .append(v.nativeTarget).append('|')
+                        .append(v.artifactId).append('\n')
+                    append("attrs:")
+                        .append(v.attributes.entries.joinToString(",") { "${it.key}=${it.value}" })
+                        .append('\n')
+                }
+            }
+            cacheFile.writeText(text)
         } catch (_: Exception) { }
     }
 
