@@ -28,8 +28,50 @@ dependencies {
     testImplementation(kotlin("test-junit5"))
 }
 
+// ---------------------------------------------------------------------------
+// Functional test wiring (GradleTestKit)
+//
+// TestKit's withPluginClasspath() does NOT inject into settings scripts, so the
+// plugin (and its plugin-marker publications) are published to a local Maven repo
+// that the functional consumer projects point their pluginManagement at.
+// ---------------------------------------------------------------------------
+val functionalTestRepo: Provider<Directory> = layout.buildDirectory.dir("functional-test-repo")
+
+publishing {
+    repositories {
+        maven {
+            name = "functionalTest"
+            url = uri(functionalTestRepo)
+        }
+    }
+}
+
+// vanniktech's signAllPublications() signs every publication; no GPG key is available
+// for local/CI functional-test publishing. Sign tasks therefore only run when the task
+// graph publishes anywhere OTHER than the functional-test repository — a test-only
+// invocation skips signing, while real releases (Maven Central, mavenLocal) keep it,
+// even if tests run in the same invocation.
+tasks.withType<org.gradle.plugins.signing.Sign>().configureEach {
+    onlyIf("signing is only skipped for functional-test-only publishing") {
+        gradle.taskGraph.allTasks.any { task ->
+            (task is org.gradle.api.publish.maven.tasks.PublishToMavenRepository &&
+                !task.name.endsWith("ToFunctionalTestRepository")) ||
+                task is org.gradle.api.publish.maven.tasks.PublishToMavenLocal
+        }
+    }
+}
+
 tasks.test {
     useJUnitPlatform()
+    dependsOn("publishAllPublicationsToFunctionalTestRepository")
+    systemProperty("functionalTest.pluginRepo", functionalTestRepo.get().asFile.absolutePath)
+    systemProperty("functionalTest.pluginVersion", version.toString())
+    // Shared TestKit home: keeps the Kotlin plugin / stdlib downloads cached across
+    // test runs instead of re-downloading them into a fresh temp dir every run.
+    systemProperty(
+        "functionalTest.testKitDir",
+        layout.buildDirectory.dir("functional-test/testkit").get().asFile.absolutePath
+    )
 }
 
 gradlePlugin {
