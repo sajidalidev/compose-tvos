@@ -495,13 +495,24 @@ class TvosArtifactMappingTest {
         assertEquals("dev.sajidali.compose.foundation", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.foundation"))
         assertEquals("dev.sajidali.androidx.navigation", TvosArtifactMapping.mapGroupId("org.jetbrains.androidx.navigation"))
     }
+
+    @Test
+    fun `mapGroupId correctly maps the D14 redirect-coverage groups`() {
+        assertEquals("dev.sajidali.androidx.lifecycle", TvosArtifactMapping.mapGroupId("org.jetbrains.androidx.lifecycle"))
+        assertEquals("dev.sajidali.androidx.savedstate", TvosArtifactMapping.mapGroupId("org.jetbrains.androidx.savedstate"))
+        assertEquals("dev.sajidali.androidx.navigationevent", TvosArtifactMapping.mapGroupId("org.jetbrains.androidx.navigationevent"))
+        assertEquals("dev.sajidali.androidx.navigation3", TvosArtifactMapping.mapGroupId("org.jetbrains.androidx.navigation3"))
+        assertEquals("dev.sajidali.compose.annotation-internal", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.annotation-internal"))
+        assertEquals("dev.sajidali.compose.collection-internal", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.collection-internal"))
+        assertEquals("dev.sajidali.compose.material3.adaptive", TvosArtifactMapping.mapGroupId("org.jetbrains.compose.material3.adaptive"))
+    }
 }
 
 class ComposeModulesTest {
 
     @Test
     fun `ALL contains all Compose module groups`() {
-        assertEquals(8, ComposeModules.ALL.size)
+        assertEquals(15, ComposeModules.ALL.size)
         assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.ui"))
         assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.foundation"))
         assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.runtime"))
@@ -510,6 +521,17 @@ class ComposeModulesTest {
         assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.animation"))
         assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.components"))
         assertTrue(ComposeModules.ALL.contains("org.jetbrains.androidx.navigation"))
+    }
+
+    @Test
+    fun `ALL contains the D14 redirect-coverage expansion groups`() {
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.androidx.lifecycle"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.androidx.savedstate"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.androidx.navigationevent"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.androidx.navigation3"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.annotation-internal"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.collection-internal"))
+        assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.material3.adaptive"))
     }
 }
 
@@ -584,6 +606,68 @@ class ComposeVersionsTest {
     fun `normalizeMappings adds global scope`() {
         val result = ComposeVersions.normalizeMappings(mapOf("1.10.0" to "mapped"))
         assertEquals("mapped", result["*:1.10.0"])
+    }
+
+    @Test
+    fun `resolveVersion within a tier picks the longer wildcard prefix regardless of insertion order`() {
+        val ascending = linkedMapOf(
+            "org.example:1.10.*" to "short-prefix",
+            "org.example:1.10.2.*" to "long-prefix"
+        )
+        assertEquals(
+            "long-prefix",
+            ComposeVersions.resolveVersion("org.example", "lib", "1.10.2.5", ascending, null),
+            "longer prefix must win when the shorter pattern is inserted first"
+        )
+
+        val descending = linkedMapOf(
+            "org.example:1.10.2.*" to "long-prefix",
+            "org.example:1.10.*" to "short-prefix"
+        )
+        assertEquals(
+            "long-prefix",
+            ComposeVersions.resolveVersion("org.example", "lib", "1.10.2.5", descending, null),
+            "longer prefix must win when the longer pattern is inserted first"
+        )
+    }
+
+    @Test
+    fun `resolveVersion within a tier prefers an exact version pattern over a wildcard`() {
+        val mappings = linkedMapOf(
+            "org.example:1.10.*" to "wildcard",
+            "org.example:1.10.2" to "exact"
+        )
+        assertEquals("exact", ComposeVersions.resolveVersion("org.example", "lib", "1.10.2", mappings, null))
+
+        val reversed = linkedMapOf(
+            "org.example:1.10.2" to "exact",
+            "org.example:1.10.*" to "wildcard"
+        )
+        assertEquals("exact", ComposeVersions.resolveVersion("org.example", "lib", "1.10.2", reversed, null))
+    }
+
+    @Test
+    fun `resolveVersion breaks remaining specificity ties by ascending lexicographic key order`() {
+        // Both keys' version patterns ("1.10.*") are equally specific, so per the documented
+        // fallback the lexicographically smaller key wins: "org.jetbrains.*:1.10.*" sorts
+        // before "org.jetbrains.compose.*:1.10.*" ('*' < 'c').
+        val ascending = linkedMapOf(
+            "org.jetbrains.*:1.10.*" to "wins-star",
+            "org.jetbrains.compose.*:1.10.*" to "wins-compose"
+        )
+        assertEquals(
+            "wins-star",
+            ComposeVersions.resolveVersion("org.jetbrains.compose.material3", "material3", "1.10.5", ascending, null)
+        )
+
+        val descending = linkedMapOf(
+            "org.jetbrains.compose.*:1.10.*" to "wins-compose",
+            "org.jetbrains.*:1.10.*" to "wins-star"
+        )
+        assertEquals(
+            "wins-star",
+            ComposeVersions.resolveVersion("org.jetbrains.compose.material3", "material3", "1.10.5", descending, null)
+        )
     }
 }
 

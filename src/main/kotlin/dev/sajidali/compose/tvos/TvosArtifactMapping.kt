@@ -244,12 +244,28 @@ object ComposeModules {
         "org.jetbrains.compose.material3",
         "org.jetbrains.compose.animation",
         "org.jetbrains.compose.components",
-        "org.jetbrains.androidx.navigation"
+        "org.jetbrains.androidx.navigation",
+        "org.jetbrains.androidx.lifecycle",
+        "org.jetbrains.androidx.savedstate",
+        "org.jetbrains.androidx.navigationevent",
+        "org.jetbrains.androidx.navigation3",
+        "org.jetbrains.compose.annotation-internal",
+        "org.jetbrains.compose.collection-internal",
+        "org.jetbrains.compose.material3.adaptive"
     )
 }
 
 /**
  * Specific artifact mappings for non-standard module names.
+ *
+ * Every group referenced by an entry below (`androidx.navigation`, `androidx.lifecycle`,
+ * `androidx.navigation3`, `androidx.savedstate`) is now also covered by a [ComposeModules.ALL]
+ * group rule, so these per-artifact mappings are functionally redundant with the group rules
+ * for redirect purposes. They are kept as-is (not removed): the settings plugin's group-rule
+ * registration skips any artifact key already present in the artifact-mapping table
+ * (`artifactMappings.containsKey(artifactKey)` guard in `ComposeTvosRedirectSettingsPlugin`),
+ * so there's no double-handling, and artifact mappings drive the cheaper `withModule` rule
+ * instead of the broader `all` rule the group mappings use.
  */
 object ComposeArtifacts {
     private const val JETBRAINS_PREFIX = "org.jetbrains"
@@ -281,6 +297,31 @@ object ComposeArtifacts {
  */
 object ComposeVersions {
 
+    /**
+     * Resolves the redirect target version for `groupId:artifactId@originalVersion`.
+     *
+     * Mapping keys are matched in six priority tiers, most specific tier first:
+     *  1. Exact artifact match (`group:artifact:versionPattern`)
+     *  2. Exact group match (`group:versionPattern`)
+     *  3. Group pattern match (`group.*:versionPattern`)
+     *  4. Global pattern (`*:versionPattern`)
+     *  5. [targetVersionOverride], if set
+     *  6. [originalVersion] itself (same-version convention)
+     *
+     * Within a single tier, more than one entry can match the same (groupId, originalVersion)
+     * pair — e.g. two overlapping wildcard version patterns, or (in tier 3) two group patterns
+     * that both cover groupId. Ties are broken deterministically by VERSION PATTERN specificity,
+     * independent of the `versionMappings` map's iteration/insertion order:
+     *  1. An exact version pattern (`versionPattern == originalVersion`, no wildcard) always
+     *     beats a wildcard version pattern.
+     *  2. Among wildcard version patterns (`X.*`), the longest literal prefix wins
+     *     (e.g. `1.10.2.*` beats `1.10.*` beats `1.*`).
+     *  3. `*` (match-anything) is the least specific version pattern.
+     *  4. Any remaining tie (identical version-pattern specificity, e.g. two overlapping group
+     *     patterns paired with the same version pattern text in tier 3) is broken by ascending
+     *     lexicographic order of the raw map key. This ordering is arbitrary but stable, so
+     *     resolution never depends on `Map` implementation or insertion order.
+     */
     fun resolveVersion(
         groupId: String,
         artifactId: String,
@@ -289,55 +330,76 @@ object ComposeVersions {
         targetVersionOverride: String?
     ): String {
         // Priority 1: Exact artifact match (group:artifact:version)
-        for ((key, targetVersion) in versionMappings) {
-            val parts = key.split(":")
-            if (parts.size == 3) {
-                val (mappingGroup, mappingArtifact, versionPattern) = parts
-                if (mappingGroup == groupId && mappingArtifact == artifactId &&
-                    matchesVersionPattern(originalVersion, versionPattern)) {
-                    return targetVersion
-                }
-            }
-        }
+        bestMatch(versionMappings) { parts ->
+            parts.size == 3 &&
+                parts[0] == groupId && parts[1] == artifactId &&
+                matchesVersionPattern(originalVersion, parts[2])
+        }?.let { return it }
 
         // Priority 2: Exact group match (group:version)
-        for ((key, targetVersion) in versionMappings) {
-            val parts = key.split(":")
-            if (parts.size == 2) {
-                val (scope, versionPattern) = parts
-                if (!scope.endsWith(".*") && scope != "*" && scope == groupId &&
-                    matchesVersionPattern(originalVersion, versionPattern)) {
-                    return targetVersion
-                }
-            }
-        }
+        bestMatch(versionMappings) { parts ->
+            parts.size == 2 &&
+                !parts[0].endsWith(".*") && parts[0] != "*" && parts[0] == groupId &&
+                matchesVersionPattern(originalVersion, parts[1])
+        }?.let { return it }
 
         // Priority 3: Group pattern match (group.*:version)
-        for ((key, targetVersion) in versionMappings) {
-            val parts = key.split(":")
-            if (parts.size == 2) {
-                val (scope, versionPattern) = parts
-                if (scope.endsWith(".*") && matchesGroupPattern(groupId, scope) &&
-                    matchesVersionPattern(originalVersion, versionPattern)) {
-                    return targetVersion
-                }
-            }
-        }
+        bestMatch(versionMappings) { parts ->
+            parts.size == 2 &&
+                parts[0].endsWith(".*") && matchesGroupPattern(groupId, parts[0]) &&
+                matchesVersionPattern(originalVersion, parts[1])
+        }?.let { return it }
 
         // Priority 4: Global pattern (*:version)
-        for ((key, targetVersion) in versionMappings) {
-            val parts = key.split(":")
-            if (parts.size == 2 && parts[0] == "*" &&
-                matchesVersionPattern(originalVersion, parts[1])) {
-                return targetVersion
-            }
-        }
+        bestMatch(versionMappings) { parts ->
+            parts.size == 2 && parts[0] == "*" && matchesVersionPattern(originalVersion, parts[1])
+        }?.let { return it }
 
         // Priority 5: Override
         targetVersionOverride?.let { return it }
 
         // Priority 6: Original
         return originalVersion
+    }
+
+    /**
+     * Scans [versionMappings] for every entry whose split key satisfies [matches] and returns
+     * the target version of the most specific one, per the version-pattern specificity/lexicographic
+     * tie-break rules documented on [resolveVersion]. Returns `null` when no entry matches.
+     */
+    private inline fun bestMatch(
+        versionMappings: Map<String, String>,
+        matches: (parts: List<String>) -> Boolean
+    ): String? {
+        var bestKey: String? = null
+        var bestVersion: String? = null
+        var bestSpecificity = Int.MIN_VALUE
+        for ((key, targetVersion) in versionMappings) {
+            val parts = key.split(":")
+            if (!matches(parts)) continue
+            val specificity = versionPatternSpecificity(parts.last())
+            val currentBestKey = bestKey
+            val isBetter = currentBestKey == null ||
+                specificity > bestSpecificity ||
+                (specificity == bestSpecificity && key < currentBestKey)
+            if (isBetter) {
+                bestKey = key
+                bestVersion = targetVersion
+                bestSpecificity = specificity
+            }
+        }
+        return bestVersion
+    }
+
+    /**
+     * Higher is more specific. Only meaningful for patterns that already satisfied
+     * [matchesVersionPattern]: an exact literal (no wildcard) is maximally specific, `X.*`
+     * wildcards rank by prefix length, and `*` is least specific.
+     */
+    private fun versionPatternSpecificity(pattern: String): Int = when {
+        pattern == "*" -> -1
+        pattern.endsWith(".*") -> pattern.length - 2
+        else -> Int.MAX_VALUE
     }
 
     private fun matchesVersionPattern(version: String, pattern: String): Boolean {
@@ -380,6 +442,14 @@ object TvosArtifactMapping {
 
     fun isComposeGroup(groupId: String): Boolean = groupId in ComposeModules.ALL
 
+    // Verified against the fork's coordinateRoot rewrite (JetBrainsPublication.mavenGroupFor,
+    // see .superpowers/sdd/task-8a-report.md): the fork parameterizes only the ROOT segment
+    // ("org.jetbrains" -> coordinateRoot="dev.sajidali") of both JETBRAINS_COMPOSE_GROUP_PREFIX
+    // ("$coordinateRoot.compose.") and JETBRAINS_FORK_GROUP_PREFIX ("$coordinateRoot.androidx.");
+    // everything after the root is untouched. A prefix-only string replace therefore reproduces
+    // the fork's rewrite exactly for every group in ComposeModules.ALL, including the new
+    // D14 groups, e.g. "org.jetbrains.androidx.lifecycle" -> "dev.sajidali.androidx.lifecycle"
+    // and "org.jetbrains.compose.annotation-internal" -> "dev.sajidali.compose.annotation-internal".
     fun mapGroupId(sourceGroupId: String): String =
         sourceGroupId.replace(SOURCE_PREFIX, TARGET_PREFIX)
 }

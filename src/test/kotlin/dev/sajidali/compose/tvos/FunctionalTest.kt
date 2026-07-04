@@ -184,6 +184,26 @@ class ComposeTvosFunctionalTest {
     }
 
     @Test
+    fun `a newly-covered ComposeModules group redirects end-to-end`(
+        @TempDir projectDir: File
+    ) {
+        writeConsumerProject(
+            projectDir,
+            dependency = "org.jetbrains.androidx.lifecycle:lifecycle-runtime:$COMPOSE_VERSION"
+        )
+
+        val result = runResolve(projectDir, target = "tvosArm64")
+
+        val resolved = result.resolvedLines()
+        val umbrella = resolved.single { it.contains("org.jetbrains.androidx.lifecycle:lifecycle-runtime:$COMPOSE_VERSION ") }
+        assertContains(umbrella, "-injected", message = "umbrella must be selected through an injected variant: $umbrella")
+        assertTrue(
+            resolved.any { it.contains("dev.sajidali.androidx.lifecycle:lifecycle-runtime-tvosarm64:$COMPOSE_VERSION") },
+            "graph must contain the fork platform module for the newly-covered androidx.lifecycle group; got:\n${resolved.joinToString("\n")}"
+        )
+    }
+
+    @Test
     fun `manifest loaded over HTTP drives version mapping end-to-end`(
         @TempDir projectDir: File
     ) {
@@ -363,6 +383,17 @@ class ComposeTvosFunctionalTest {
                 )
                 publishUmbrellaWithPlatforms(
                     "dev.sajidali.example.tv", "widgets", COMPOSE_VERSION,
+                    listOf(FixtureNativeTarget.TVOS_ARM64, FixtureNativeTarget.TVOS_SIMULATOR_ARM64)
+                )
+                // D14 redirect-coverage expansion: org.jetbrains.androidx.lifecycle is now a
+                // default ComposeModules.ALL group. Upstream umbrella: iOS only.
+                publishUmbrellaWithPlatforms(
+                    "org.jetbrains.androidx.lifecycle", "lifecycle-runtime", COMPOSE_VERSION,
+                    listOf(FixtureNativeTarget.IOS_ARM64)
+                )
+                // Fork umbrella + platform modules discovered by the plugin.
+                publishUmbrellaWithPlatforms(
+                    "dev.sajidali.androidx.lifecycle", "lifecycle-runtime", COMPOSE_VERSION,
                     listOf(FixtureNativeTarget.TVOS_ARM64, FixtureNativeTarget.TVOS_SIMULATOR_ARM64)
                 )
             }
