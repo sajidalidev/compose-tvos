@@ -153,13 +153,6 @@ gradlePlugin {
             tags.set(listOf("kotlin", "compose", "multiplatform", "tvos", "apple", "kotlin-native"))
             implementationClass = "dev.sajidali.compose.tvos.ComposeTvosRedirectSettingsPlugin"
         }
-        create("composeTvosProject") {
-            id = "dev.sajidali.compose-tvos-project"
-            displayName = "Compose tvOS (Project Plugin)"
-            description = "Project plugin for Compose tvOS. Use the settings plugin (dev.sajidali.compose-tvos) instead."
-            tags.set(listOf("kotlin", "compose", "multiplatform", "tvos"))
-            implementationClass = "dev.sajidali.compose.tvos.ComposeTvosRedirectPlugin"
-        }
     }
 }
 

@@ -17,7 +17,7 @@ Add the plugin to your `settings.gradle.kts`:
 
 ```kotlin
 plugins {
-    id("dev.sajidali.compose-tvos") version "1.0.0"
+    id("dev.sajidali.compose-tvos") version "1.1.0"
 }
 ```
 
@@ -36,7 +36,7 @@ The plugin works out of the box with sensible defaults. Optional configuration:
 ```kotlin
 // settings.gradle.kts
 plugins {
-    id("dev.sajidali.compose-tvos") version "1.0.0"
+    id("dev.sajidali.compose-tvos") version "1.1.0"
 }
 
 composeTvos {
