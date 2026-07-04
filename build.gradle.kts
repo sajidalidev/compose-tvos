@@ -1,3 +1,5 @@
+import java.security.MessageDigest
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.serialization)
@@ -7,7 +9,72 @@ plugins {
 }
 
 group = property("GROUP").toString()
-version = property("VERSION").toString()
+
+// ---------------------------------------------------------------------------
+// Functional-test plugin version (content-derived).
+//
+// The functional tests publish this plugin into build/functional-test-repo and
+// resolve it through a PERSISTENT shared TestKit home (build/functional-test/
+// testkit). Gradle caches static versions in that home's modules-2 cache
+// indefinitely and never re-resolves a republished same-version coordinate from
+// a file:// repo — so republishing changed plugin code under the static VERSION
+// would make functional tests silently validate STALE plugin bytes.
+//
+// Fix: for test-only invocations the effective version is
+// "<VERSION>-ft-<hash>", where <hash> is a stable digest of every file under
+// src/main (relative paths + bytes). Unchanged source -> unchanged version
+// (test task stays up-to-date); any source edit -> brand-new coordinate that
+// busts the TestKit module cache. Old -ft-* versions accumulate as small
+// entries in build/functional-test-repo (dropped by `clean`) and in the TestKit
+// cache — an accepted cost.
+//
+// Real publishes are untouched: the override applies ONLY when a test-carrying
+// task (test/check/build) was requested AND no real publish task was. Because
+// abbreviated task names (e.g. `pTML`) can evade this configuration-time check,
+// a taskGraph.whenReady guard below additionally FAILS the build if a real
+// publish task ever ends up in the graph while an -ft- version is active.
+fun srcMainContentHash(): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val root = layout.projectDirectory.dir("src/main").asFile
+    root.walkTopDown()
+        .filter { it.isFile }
+        .sortedBy { it.relativeTo(root).invariantSeparatorsPath }
+        .forEach { file ->
+            digest.update(file.relativeTo(root).invariantSeparatorsPath.toByteArray(Charsets.UTF_8))
+            digest.update(0)
+            digest.update(file.readBytes())
+        }
+    return digest.digest().joinToString("") { "%02x".format(it) }.take(10)
+}
+
+val baseVersion = property("VERSION").toString()
+val requestedTaskNames = gradle.startParameter.taskNames.map { it.substringAfterLast(':') }
+val realPublishRequested = requestedTaskNames.any {
+    it.startsWith("publish") && it != "publishAllPublicationsToFunctionalTestRepository"
+}
+val testCarryingTaskRequested = requestedTaskNames.any { it == "test" || it == "check" || it == "build" }
+val useFunctionalTestVersion = testCarryingTaskRequested && !realPublishRequested
+
+version = if (useFunctionalTestVersion) "$baseVersion-ft-${srcMainContentHash()}" else baseVersion
+
+// Safety net for the abbreviation loophole above: never let an -ft- version
+// reach a real repository (Maven Central, Plugin Portal, mavenLocal).
+gradle.taskGraph.whenReady {
+    if (!project.version.toString().contains("-ft-")) return@whenReady
+    val offending = allTasks.filter { task ->
+        (task is org.gradle.api.publish.maven.tasks.PublishToMavenRepository &&
+            !task.name.endsWith("ToFunctionalTestRepository")) ||
+            task is org.gradle.api.publish.maven.tasks.PublishToMavenLocal ||
+            task.name == "publishPlugins"
+    }
+    if (offending.isNotEmpty()) {
+        throw GradleException(
+            "Refusing to publish functional-test version '${project.version}' to a real repository " +
+                "(tasks: ${offending.joinToString { it.path }}). Run the publish in its own " +
+                "invocation, without test/check/build."
+        )
+    }
+}
 
 java {
     sourceCompatibility = JavaVersion.VERSION_11
