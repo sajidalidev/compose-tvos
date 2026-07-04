@@ -36,7 +36,53 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
         }
 
         project.afterEvaluate {
+            detectTvosTargets(project)
             configureDependencySubstitution(project, sharedConfig)
+        }
+    }
+
+    /**
+     * Task 5 warning-quality guard: [TvosVariantInjectionRule] only ever sees resolved
+     * component coordinates -- never which Kotlin targets a project itself declares -- so it
+     * cannot distinguish a genuine tvOS consumer from an android/iOS-only Compose project
+     * whose umbrella modules resolve through the exact same group/artifact mapping and would
+     * therefore ALSO show up as "empty discovery" once no fork artifacts exist for their
+     * versions (warning about that would be spurious noise, worse than the silent no-op this
+     * task is fixing). This plugin, applied to every project, CAN see the project's `kotlin`
+     * extension, so it detects tvOS targets here and sets [tvosTargetsDetected]; the settings
+     * plugin's end-of-build summary only warns/strict-fails when this flag is set.
+     *
+     * No hard dependency on Kotlin Gradle Plugin classes (not on this plugin's compile
+     * classpath): `kotlin { }`'s `KotlinProjectExtension`/`KotlinMultiplatformExtension` are
+     * looked up purely by name/reflection, defensively -- any failure (extension absent,
+     * shape unexpected, method missing) just leaves the flag unset, which only suppresses a
+     * warning rather than crashing configuration.
+     *
+     * Limitation: on a configuration-cache-REUSED build this `afterEvaluate` does not re-run
+     * (the whole configuration phase is skipped), so the flag defaults to false for that build
+     * and the warning/strictMode-failure is suppressed -- an accepted config-cache-reuse gap,
+     * matching the same limitation on the bookkeeping side (see
+     * `TvosVariantInjectionRule.resetDiagnostics`).
+     */
+    private fun detectTvosTargets(project: Project) {
+        try {
+            val kotlinExtension = project.extensions.findByName("kotlin") ?: return
+            val getTargets = kotlinExtension.javaClass.methods
+                .firstOrNull { it.name == "getTargets" && it.parameterCount == 0 } ?: return
+            val targets = getTargets.invoke(kotlinExtension) as? Iterable<*> ?: return
+
+            val hasTvosTarget = targets.any { target ->
+                val getName = target?.javaClass?.methods
+                    ?.firstOrNull { it.name == "getName" && it.parameterCount == 0 }
+                (getName?.invoke(target) as? String)?.startsWith("tvos", ignoreCase = true) == true
+            }
+            if (hasTvosTarget) {
+                tvosTargetsDetected = true
+            }
+        } catch (_: Exception) {
+            // Reflection is best-effort/defensive: any failure here must not crash
+            // configuration for an unrelated reason -- it just leaves the flag unset,
+            // which fails toward silence (no spurious warning), not toward a crash.
         }
     }
 
@@ -123,6 +169,20 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
 
         if (verbose) {
             logger.lifecycle("[ComposeTvosRedirect] Dependency substitution configured")
+        }
+    }
+
+    companion object {
+        // Task 5 warning-quality guard flag; see `detectTvosTargets` KDoc above. `@Volatile`
+        // because it is written from per-project `afterEvaluate` callbacks (potentially
+        // several projects in a multi-project build) and read later from
+        // `TvosDiagnosticsService.close()`.
+        @Volatile
+        internal var tvosTargetsDetected: Boolean = false
+
+        /** Clears the flag; called once per build (alongside `TvosVariantInjectionRule.resetDiagnostics`). */
+        fun resetTvosTargetDetection() {
+            tvosTargetsDetected = false
         }
     }
 }

@@ -41,6 +41,15 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         val cacheRoot = settings.startParameter.gradleUserHomeDir
 
         settings.gradle.settingsEvaluated { evaluatedSettings ->
+            // Diagnostics bookkeeping (Task 5 / defect D1) lives at the companion-object level
+            // in TvosVariantInjectionRule / ComposeTvosRedirectPlugin, which -- like the
+            // existing variant-discovery caches -- outlives a single build in a warm Gradle
+            // daemon. Reset here, once per (re-)configured build, so the end-of-build summary
+            // reports only THIS build's state rather than accumulating stale entries from a
+            // previous build sharing the same daemon.
+            TvosVariantInjectionRule.resetDiagnostics()
+            ComposeTvosRedirectPlugin.resetTvosTargetDetection()
+
             val verbose = extension.verbose.get()
             val offline = evaluatedSettings.gradle.startParameter.isOffline
             val repositoryUrls = collectRepositoryUrls(evaluatedSettings, extension)
@@ -75,6 +84,23 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
                 project.extensions.extraProperties.set(SHARED_CONFIG_KEY, config)
                 project.plugins.apply(ComposeTvosRedirectPlugin::class.java)
             }
+
+            // End-of-build diagnostics summary (Task 5 / defect D1): a BuildService's
+            // close() -- not `settings.gradle.projectsEvaluated` or `gradle.buildFinished`,
+            // see TvosDiagnosticsService's KDoc for why -- so it runs once, after every
+            // TvosVariantInjectionRule execution for this build has already happened,
+            // whether resolution was eager or (the common case) deferred to task execution,
+            // and remains configuration-cache compatible.
+            val diagnosticsService = evaluatedSettings.gradle.sharedServices.registerIfAbsent(
+                TvosDiagnosticsService.NAME,
+                TvosDiagnosticsService::class.java
+            ) { spec ->
+                spec.parameters.strictMode.set(extension.strictMode)
+            }
+            // Force creation now: an unused/never-`.get()` build service is never
+            // instantiated, and Gradle only calls close() on build services it actually
+            // created, so a purely lazy registration would silently never report anything.
+            diagnosticsService.get()
         }
     }
 

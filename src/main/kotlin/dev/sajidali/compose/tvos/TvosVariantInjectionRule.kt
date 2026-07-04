@@ -13,6 +13,36 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 /**
+ * A single successful injection recorded for the end-of-build diagnostics summary (D1,
+ * Task 5): the umbrella module that was redirected, the target coordinate its variants
+ * point at, and how many variants were mirrored in.
+ */
+data class InjectionRecord(
+    val sourceModule: String,
+    val targetCoordinate: String,
+    val variantCount: Int
+)
+
+/**
+ * A redirect-eligible module (artifact/group mapping matched, umbrella-shaped) for which
+ * [TvosVariantDiscovery] returned zero variants -- the "silent no-op" case the D1 defect
+ * describes. Recorded so the settings plugin's end-of-build summary can warn (or, in
+ * `strictMode`, fail) instead of degrading invisibly.
+ */
+data class EmptyDiscoveryRecord(
+    val sourceModule: String,
+    val targetCoordinate: String,
+    val repositoryUrls: List<String>,
+    val offline: Boolean
+)
+
+/** Immutable point-in-time read of [TvosVariantInjectionRule]'s diagnostics bookkeeping. */
+data class DiagnosticsSnapshot(
+    val injections: List<InjectionRecord>,
+    val emptyDiscoveries: List<EmptyDiscoveryRecord>
+)
+
+/**
  * Single class-based component metadata rule that injects tvOS variants into JetBrains
  * Compose Multiplatform (and configured additional) umbrella modules.
  *
@@ -70,7 +100,16 @@ abstract class TvosVariantInjectionRule @Inject constructor(
             group, moduleName, id.version, params.versionMappings, params.targetVersionOverride
         )
         val variants = getVariants(targetGroup, targetArtifact, version)
-        if (variants.isEmpty()) return
+        val sourceModule = "$group:$moduleName:${id.version}"
+        val targetCoordinate = "$targetGroup:$targetArtifact:$version"
+        if (variants.isEmpty()) {
+            emptyDiscoveries.putIfAbsent(
+                sourceModule,
+                EmptyDiscoveryRecord(sourceModule, targetCoordinate, params.repositoryUrls, params.offline)
+            )
+            return
+        }
+        injections.putIfAbsent(sourceModule, InjectionRecord(sourceModule, targetCoordinate, variants.size))
 
         if (params.verbose) {
             logger.lifecycle("[ComposeTvosRedirect] Injecting ${variants.size} tvOS variants into: $group:$moduleName:${id.version}")
@@ -136,5 +175,34 @@ abstract class TvosVariantInjectionRule @Inject constructor(
         // instance field to actually memoize across components, mirroring the previous
         // settings-plugin-local `variantCache`.
         private val variantCache = ConcurrentHashMap<String, List<TvosVariant>>()
+
+        // -- diagnostics bookkeeping (Task 5 / defect D1) ---------------------------------
+        // Rules execute concurrently across components (and, for a multi-project build,
+        // potentially across projects), hence ConcurrentHashMap; keyed by "group:module:
+        // version" so repeat resolution of the same coordinate (warm caches, multiple
+        // resolvable configurations hitting the same umbrella) dedups to one entry rather
+        // than accumulating duplicates.
+        //
+        // Lifetime: like `variantCache` above, these maps live for the lifetime of the
+        // classloader (a warm Gradle daemon spans many builds), so they must be reset once
+        // per build -- see `resetDiagnostics()`, called from the settings plugin at
+        // `settingsEvaluated` -- or a summary would accumulate stale entries from earlier
+        // builds in the same daemon. On a configuration-cache-REUSED build, `settingsEvaluated`
+        // itself does not re-run (the whole configuration phase is skipped and the task graph
+        // is replayed from the cache), so neither the reset nor the summary/warn/strictMode
+        // reporting runs for that build -- an accepted config-cache-reuse limitation, see
+        // TvosDiagnosticsService's KDoc.
+        private val injections = ConcurrentHashMap<String, InjectionRecord>()
+        private val emptyDiscoveries = ConcurrentHashMap<String, EmptyDiscoveryRecord>()
+
+        /** Clears diagnostics bookkeeping; called once per build before the rule can fire. */
+        fun resetDiagnostics() {
+            injections.clear()
+            emptyDiscoveries.clear()
+        }
+
+        /** Point-in-time read of the diagnostics bookkeeping accumulated so far this build. */
+        fun diagnosticsSnapshot(): DiagnosticsSnapshot =
+            DiagnosticsSnapshot(injections.values.toList(), emptyDiscoveries.values.toList())
     }
 }

@@ -285,9 +285,21 @@ class ComposeTvosFunctionalTest {
             .withArguments("resolveGraph", "-PresolveTarget=tvosArm64", "--console=plain", "--offline")
             .buildAndFail()
 
-        assertFalse(
-            cold.output.contains("dev.sajidali"),
+        // No RESOLVED/ARTIFACT line may ever name a fork coordinate: the base org.jetbrains
+        // dependency fails to resolve before any graph walking/printing happens (see the
+        // UNRESOLVED assertion below), so nothing is ever actually injected or substituted.
+        // The build's output DOES legitimately mention "dev.sajidali" once, in the Task 5
+        // empty-discovery WARN block (offline discovery for this never-before-seen coordinate
+        // correctly comes back empty, and this consumer declares tvOS targets) -- that WARN is
+        // the intended new signal for exactly this "would have injected but found nothing"
+        // case, not a regression, so it is asserted on explicitly rather than forbidden.
+        assertTrue(
+            (cold.resolvedLines() + cold.artifactLines()).none { it.contains("dev.sajidali") },
             "cold --offline run must not inject or resolve any fork coordinate; got:\n${cold.output}"
+        )
+        assertTrue(
+            cold.output.contains("[ComposeTvos] WARNING") && cold.output.contains("dev.sajidali.compose.ui:ui:$COLD_VERSION"),
+            "cold --offline run must WARN about the empty-discovery module it would have injected; got:\n${cold.output}"
         )
         assertTrue(
             cold.output.contains("Could not resolve"),
@@ -331,12 +343,108 @@ class ComposeTvosFunctionalTest {
         )
     }
 
+    // -- Task 5 (defect D1) diagnostics summary / warn / strictMode ----------------------
+
+    @Test
+    fun `strictMode fails the build listing every empty-discovery module`(
+        @TempDir warmupProjectDir: File,
+        @TempDir projectDir: File
+    ) {
+        // Same warm-up rationale as the pre-existing cold-offline test: prime the shared
+        // TestKit daemon's tooling classpath with the well-established coordinate first, so
+        // this test does not depend on JUnit's execution order relative to the others.
+        writeConsumerProject(warmupProjectDir, dependency = "org.jetbrains.compose.ui:ui:$COMPOSE_VERSION")
+        runResolve(warmupProjectDir, target = "tvosArm64")
+
+        writeConsumerProject(
+            projectDir,
+            dependency = "org.jetbrains.compose.ui:ui:$COLD_VERSION",
+            composeTvosConfig = """
+                manifestUrl.set("")
+                strictMode.set(true)
+            """.trimIndent()
+        )
+
+        val result = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("resolveGraph", "-PresolveTarget=tvosArm64", "--console=plain", "--offline")
+            .buildAndFail()
+
+        assertTrue(
+            result.output.contains("[ComposeTvos] strictMode"),
+            "strictMode must fail the build with its own diagnostic message; got:\n${result.output}"
+        )
+        assertTrue(
+            result.output.contains("org.jetbrains.compose.ui:ui:$COLD_VERSION -> dev.sajidali.compose.ui:ui:$COLD_VERSION"),
+            "strictMode failure must list the empty-discovery module and its probed target coordinate; got:\n${result.output}"
+        )
+    }
+
+    @Test
+    fun `successful discovery prints the summary line and never warns`(
+        @TempDir projectDir: File
+    ) {
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.ui:ui:$COMPOSE_VERSION")
+
+        val result = runResolve(projectDir, target = "tvosArm64")
+
+        assertTrue(
+            result.output.contains("[ComposeTvos] Injected tvOS variants into 1 module(s) (0 skipped)"),
+            "a fully-successful discovery must print the end-of-build summary lifecycle line; got:\n${result.output}"
+        )
+        assertFalse(
+            result.output.contains("[ComposeTvos] WARNING"),
+            "a fully-successful discovery must never print the empty-discovery WARN block; got:\n${result.output}"
+        )
+    }
+
+    @Test
+    fun `a consumer with no tvOS Kotlin targets is never warned even when discovery is empty`(
+        @TempDir warmupProjectDir: File,
+        @TempDir projectDir: File
+    ) {
+        writeConsumerProject(warmupProjectDir, dependency = "org.jetbrains.compose.ui:ui:$COMPOSE_VERSION")
+        runResolve(warmupProjectDir, target = "tvosArm64")
+
+        // COLD_VERSION has no dev.sajidali fork counterpart published at all (see its
+        // declaration below) -- exactly the "would have injected but found nothing" shape --
+        // but this consumer declares ONLY an iOS target, so the tvOS-target-detection guard
+        // (ComposeTvosRedirectPlugin.detectTvosTargets) must never flip its flag, and the
+        // WARN must stay suppressed even though the rule still runs (and still records an
+        // empty discovery) for the org.jetbrains.compose.ui:ui module in general.
+        writeConsumerProject(
+            projectDir,
+            dependency = "org.jetbrains.compose.ui:ui:$COLD_VERSION",
+            kotlinTargets = listOf("iosArm64")
+        )
+
+        val result = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("resolveGraph", "-PresolveTarget=iosArm64", "--console=plain", "--offline")
+            .build()
+
+        assertTrue(
+            result.resolvedLines().any { it.contains("org.jetbrains.compose.ui:ui-iosarm64:$COLD_VERSION") },
+            "an iOS-only consumer must still resolve the upstream iOS module normally; got:\n${result.output}"
+        )
+        assertFalse(
+            result.output.contains("[ComposeTvos] WARNING"),
+            "a consumer declaring no tvOS Kotlin target must never see the empty-discovery WARN, " +
+                "even though the module is otherwise redirect-eligible and discovery is genuinely " +
+                "empty -- this is the warning-quality guard the WARN block would otherwise spuriously " +
+                "fire for every android/iOS-only Compose consumer; got:\n${result.output}"
+        )
+    }
+
     // -- consumer project scaffolding ----------------------------------------------------
 
     private fun writeConsumerProject(
         projectDir: File,
         dependency: String,
-        composeTvosConfig: String = """manifestUrl.set("")"""
+        composeTvosConfig: String = """manifestUrl.set("")""",
+        kotlinTargets: List<String> = listOf("tvosArm64", "tvosSimulatorArm64", "iosArm64")
     ) {
         projectDir.resolve("settings.gradle.kts").writeText(
             """
@@ -382,9 +490,7 @@ class ComposeTvosFunctionalTest {
             }
 
             kotlin {
-                tvosArm64()
-                tvosSimulatorArm64()
-                iosArm64()
+                ${kotlinTargets.joinToString("\n                ") { "$it()" }}
 
                 sourceSets.commonMain.dependencies {
                     implementation("$dependency")

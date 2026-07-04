@@ -98,6 +98,22 @@ abstract class ComposeTvosRedirectSettingsExtension @Inject constructor(
     val versionMappings: MapProperty<String, String> =
         objects.mapProperty(String::class.java, String::class.java)
 
+    /**
+     * When true, the end-of-build diagnostics summary throws a [org.gradle.api.GradleException]
+     * (failing the configuration) instead of only warning when a redirect-eligible module (a
+     * module this plugin would inject tvOS variants into) has empty tvOS variant discovery --
+     * e.g. the `dev.sajidali` fork artifacts do not exist for the requested version. The
+     * exception message lists every such module.
+     *
+     * Like the warning it replaces, this only fires when the consuming project declares at
+     * least one tvOS Kotlin target (see the plugin's tvOS-target-detection guard) -- an
+     * android/iOS-only Compose project is never affected by `strictMode`, even if its
+     * (irrelevant, never-consumed) umbrella modules also happen to be redirect-eligible.
+     *
+     * Default: false.
+     */
+    val strictMode: Property<Boolean> = objects.property(Boolean::class.java).convention(false)
+
     companion object {
         const val NAME = "composeTvos"
     }
