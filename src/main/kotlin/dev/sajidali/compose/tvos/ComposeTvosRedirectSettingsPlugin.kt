@@ -34,12 +34,18 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
             ComposeTvosRedirectSettingsExtension::class.java
         )
 
+        // The directory Gradle itself resolved from GRADLE_USER_HOME / --gradle-user-home /
+        // the default `~/.gradle` — computed once and shared by both disk caches below so
+        // neither silently drifts from the Gradle invocation actually running the build
+        // (e.g. under GradleTestKit, where it differs from `user.home`).
+        val cacheRoot = settings.startParameter.gradleUserHomeDir
+
         settings.gradle.settingsEvaluated { evaluatedSettings ->
             val verbose = extension.verbose.get()
             val repositoryUrls = collectRepositoryUrls(evaluatedSettings, extension)
             val manifestMappings = VersionManifestLoader.load(
                 manifestUrl = extension.manifestUrl.orNull,
-                cacheDir = File(System.getProperty("user.home"), ".gradle"),
+                cacheDir = cacheRoot,
                 refreshDependencies = evaluatedSettings.gradle.startParameter.isRefreshDependencies,
                 logger = if (verbose) logger else null
             )
@@ -51,7 +57,7 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
                 logger.lifecycle("[ComposeTvosRedirect] Loaded ${manifestMappings.size} version override(s) from manifest")
             }
 
-            configureComponentMetadataRules(evaluatedSettings, extension, repositoryUrls, manifestMappings)
+            configureComponentMetadataRules(evaluatedSettings, extension, repositoryUrls, manifestMappings, cacheRoot)
 
             val config = PluginConfiguration(
                 verbose = extension.verbose.get(),
@@ -98,7 +104,8 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         settings: Settings,
         extension: ComposeTvosRedirectSettingsExtension,
         repositoryUrls: List<String>,
-        manifestMappings: Map<String, String>
+        manifestMappings: Map<String, String>,
+        cacheDir: File
     ) {
         val verbose = extension.verbose.get()
         val targetVersionOverride = extension.targetVersion.orNull
@@ -109,8 +116,6 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         val versionMappings = mutableMapOf<String, String>()
         versionMappings.putAll(ComposeVersions.normalizeMappings(manifestMappings))
         versionMappings.putAll(ComposeVersions.normalizeMappings(extension.versionMappings.get()))
-
-        val cacheDir = File(System.getProperty("user.home"), ".gradle")
 
         // Build artifact mappings
         val artifactMappings = mutableMapOf<String, Pair<String, String>>()
@@ -218,7 +223,8 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
                         // metadata / sources / runtime variant lookups — if a consumer
                         // reports unresolved references in a shared source set (e.g.
                         // `appleMain`) after upgrading, deleting the cache directory
-                        // (~/.gradle/compose-tvos-redirect-cache-v2/) forces re-discovery
+                        // (<gradleUserHome>/compose-tvos-redirect-cache-v3/, `~/.gradle` by
+                        // default) forces re-discovery
                         // with the full attribute set.
                         mapOf(
                             "org.gradle.category" to "library",

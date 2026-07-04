@@ -1,6 +1,8 @@
 package dev.sajidali.compose.tvos
 
 import org.gradle.testfixtures.ProjectBuilder
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -172,6 +174,154 @@ class TvosVariantDiscoveryTest {
         assertEquals("non-jvm", attrs["org.gradle.jvm.environment"])
         assertEquals("tvos_arm64", attrs["org.jetbrains.kotlin.native.target"])
         assertEquals("native", attrs["org.jetbrains.kotlin.platform.type"])
+    }
+
+    @Test
+    fun `parseModuleMetadata is robust to a nested object with a name-like key before attributes`() {
+        // A regex-based section splitter keyed on `(?=\{\s*"name"\s*:)` would incorrectly
+        // treat the nested dependency object's own "name" field as a new section boundary,
+        // severing this variant's real name from its attributes/available-at block.
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64ApiElements",
+              "dependencies": [
+                { "name": "some-dependency", "group": "org.example", "module": "somelib" }
+              ],
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_arm64"
+              },
+              "available-at": { "module": "ui-tvosarm64" }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "ui")
+        assertEquals(1, variants.size)
+        assertEquals("tvosArm64ApiElements", variants[0].variantName)
+        assertEquals("ui-tvosarm64", variants[0].artifactId)
+    }
+
+    @Test
+    fun `parseModuleMetadata preserves attribute values containing commas and equals signs`() {
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64ApiElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_arm64",
+                "custom.note": "value,with=commas,and=equals"
+              },
+              "available-at": { "module": "ui-tvosarm64" }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "ui")
+        assertEquals(1, variants.size)
+        assertEquals("value,with=commas,and=equals", variants[0].attributes["custom.note"])
+    }
+
+    @Test
+    fun `parseModuleMetadata stringifies boolean and numeric attribute values`() {
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64ApiElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_arm64",
+                "custom.enabled": true,
+                "custom.priority": 42,
+                "custom.ratio": 1.5
+              },
+              "available-at": { "module": "ui-tvosarm64" }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "ui")
+        assertEquals(1, variants.size)
+        val attrs = variants[0].attributes
+        assertEquals("true", attrs["custom.enabled"])
+        assertEquals("42", attrs["custom.priority"])
+        assertEquals("1.5", attrs["custom.ratio"])
+    }
+
+    @Test
+    fun `parseModuleMetadata returns empty list for malformed JSON`() {
+        assertTrue(TvosVariantDiscovery.parseModuleMetadata("{ this is not valid json").isEmpty())
+        assertTrue(TvosVariantDiscovery.parseModuleMetadata("").isEmpty())
+    }
+}
+
+class TvosVariantDiscoveryDiskCacheTest {
+
+    private val moduleJson = """
+    {
+      "variants": [
+        {
+          "name": "tvosArm64ApiElements",
+          "attributes": {
+            "org.jetbrains.kotlin.native.target": "tvos_arm64"
+          },
+          "available-at": { "module": "cachetest-tvosarm64" }
+        }
+      ]
+    }
+    """.trimIndent()
+
+    @Test
+    fun `corrupt disk cache is ignored and variants are refetched from the repository`(@TempDir tempDir: File) {
+        TvosVariantDiscovery.clearCache()
+
+        val groupId = "dev.sajidali.compose.cachetest"
+        val artifactId = "cachetest"
+        val version = "1.0.0-disk-cache-test"
+
+        val repoDir = File(tempDir, "repo")
+        val moduleFile = File(
+            repoDir,
+            "dev/sajidali/compose/cachetest/cachetest/$version/cachetest-$version.module"
+        )
+        moduleFile.parentFile.mkdirs()
+        moduleFile.writeText(moduleJson)
+
+        val cacheDir = File(tempDir, "cache")
+        val cacheKey = "$groupId:$artifactId:$version"
+        val safeKey = cacheKey.replace(":", "_").replace(".", "_")
+        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.cache")
+        cacheFile.parentFile.mkdirs()
+        cacheFile.writeText("{ this is not valid cache json at all")
+
+        val variants = TvosVariantDiscovery.discoverVariants(
+            repositoryUrls = listOf(repoDir.toURI().toString()),
+            groupId = groupId,
+            artifactId = artifactId,
+            version = version,
+            cacheDir = cacheDir
+        )
+
+        assertEquals(1, variants.size, "corrupt cache must not short-circuit discovery")
+        assertEquals("tvos_arm64", variants[0].nativeTarget)
+        assertEquals("cachetest-tvosarm64", variants[0].artifactId)
+
+        // The corrupt file must have been overwritten with a valid, re-readable cache once
+        // discovery succeeded.
+        TvosVariantDiscovery.clearCache()
+        val cached = TvosVariantDiscovery.discoverVariants(
+            repositoryUrls = emptyList(),
+            groupId = groupId,
+            artifactId = artifactId,
+            version = version,
+            cacheDir = cacheDir
+        )
+        assertEquals(1, cached.size, "valid cache written after refetch must be re-readable")
     }
 }
 

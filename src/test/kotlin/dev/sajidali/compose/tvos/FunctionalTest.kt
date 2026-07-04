@@ -30,11 +30,13 @@ import kotlin.test.assertTrue
  * ids and selected variant names) and it resolves both the graph and the artifacts,
  * failing loudly on unresolved dependencies.
  *
- * Isolation: the plugin hardcodes `System.getProperty("user.home")` for its disk caches,
- * so every consumer project sets `systemProp.user.home` to a fake home under
- * `build/functional-test/` — test runs never touch the real `~/.gradle` caches. The
- * TestKit Gradle home is shared (`build/functional-test/testkit`) to amortize the
- * one-time Kotlin plugin/stdlib downloads.
+ * Isolation: the plugin resolves its disk caches from `settings.startParameter.gradleUserHomeDir`
+ * — the Gradle user home TestKit already isolates via `withTestKitDir` (shared at
+ * `build/functional-test/testkit` to amortize the one-time Kotlin plugin/stdlib downloads) —
+ * so test runs never touch the real `~/.gradle` caches. Each consumer project additionally
+ * sets `systemProp.user.home` to a fake home under `build/functional-test/`, exercised here
+ * only to confirm that override still reaches the consumer daemon (some other tooling may
+ * rely on it), independent of the plugin's own cache-root resolution.
  */
 class ComposeTvosFunctionalTest {
 
@@ -61,15 +63,27 @@ class ComposeTvosFunctionalTest {
             "artifacts must come from the fork platform module; got:\n${result.artifactLines().joinToString("\n")}"
         )
 
-        // user.home isolation: the override must reach the consumer's daemon (the plugin
-        // hardcodes System.getProperty("user.home") for its caches) ...
+        // systemProp.user.home still reaches the consumer's daemon (unrelated consumers may
+        // rely on it), but the plugin's disk caches no longer key off it: they resolve their
+        // cache root from `settings.startParameter.gradleUserHomeDir`, which TestKit points
+        // at `testKitDir` (`withTestKitDir`), not at the fake `user.home`.
         val userHome = result.output.lineSequence().single { it.startsWith("USERHOME> ") }.removePrefix("USERHOME> ")
         assertEquals(fakeHome.absolutePath, userHome, "systemProp.user.home must reach the consumer build")
-        // ... and the variant-discovery cache must consequently land in the fake home, never
-        // in the real ~/.gradle. (The fake home persists across runs on purpose: on a warm
-        // rerun the daemon's in-memory discovery cache may legitimately skip re-writing it.)
-        val cacheFile = fakeHome.resolve(".gradle/compose-tvos-redirect-cache-v2/dev_sajidali_compose_ui_ui_1_11_0.cache")
-        assertTrue(cacheFile.exists(), "discovery cache expected under fake user.home: $cacheFile")
+        // The variant-discovery cache must land under the TestKit Gradle user home ...
+        // (it persists across runs on purpose: on a warm rerun the daemon's in-memory
+        // discovery cache may legitimately skip re-writing it.)
+        val cacheFile = testKitDir.resolve("compose-tvos-redirect-cache-v3/dev_sajidali_compose_ui_ui_1_11_0.cache")
+        assertTrue(cacheFile.exists(), "discovery cache expected under the TestKit gradle user home: $cacheFile")
+        // ... and never under the fake user.home ...
+        assertFalse(
+            fakeHome.resolve(".gradle/compose-tvos-redirect-cache-v3").exists(),
+            "discovery cache must not land under the fake user.home"
+        )
+        // ... nor under the real ~/.gradle.
+        assertFalse(
+            File(System.getProperty("user.home"), ".gradle/compose-tvos-redirect-cache-v3").exists(),
+            "discovery cache must never touch the real ~/.gradle"
+        )
     }
 
     @Test
@@ -430,7 +444,7 @@ class VersionManifestLoaderHttpTest {
     }
 
     private fun manifestCacheFiles(cacheDir: File): List<File> =
-        cacheDir.resolve("compose-tvos-redirect-cache-v2/version-manifest")
+        cacheDir.resolve("compose-tvos-redirect-cache-v3/version-manifest")
             .listFiles()?.toList().orEmpty()
 }
 

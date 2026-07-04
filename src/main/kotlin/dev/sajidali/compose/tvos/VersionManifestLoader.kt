@@ -31,7 +31,7 @@ internal data class VersionManifest(
  */
 internal object VersionManifestLoader {
 
-    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache-v2/version-manifest"
+    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache-v3/version-manifest"
     private const val FETCH_TIMEOUT_MS = 5_000
     private const val CACHE_TTL_MS = 24L * 60 * 60 * 1000
 

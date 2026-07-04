@@ -1,5 +1,11 @@
 package dev.sajidali.compose.tvos
 
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.gradle.api.logging.Logger
 import java.io.File
 import java.net.HttpURLConnection
@@ -17,6 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
  * sources) — not just the api request. Empty map means the cache pre-dates this field
  * and a degraded-but-functional default set is used at injection time.
  */
+@Serializable
 data class TvosVariant(
     val variantName: String,
     val nativeTarget: String,
@@ -44,10 +51,12 @@ object TvosTargets {
  */
 object TvosVariantDiscovery {
     private val variantCache = ConcurrentHashMap<String, List<TvosVariant>>()
-    // v2: cache entries now include the full attribute map per variant. Old v1 caches
-    // (3-field pipe-separated lines) are ignored rather than migrated — a single cold
-    // network fetch repopulates v2.
-    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache-v2"
+    // v3: cache entries are now serialized as JSON (List<TvosVariant> via kotlinx-serialization)
+    // instead of the bespoke pipe/comma-delimited format. Old v1/v2 caches are ignored
+    // rather than migrated — a single cold network fetch repopulates v3.
+    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache-v3"
+
+    private val json = Json { ignoreUnknownKeys = true }
 
     fun discoverVariants(
         repositoryUrls: List<String>,
@@ -136,87 +145,62 @@ object TvosVariantDiscovery {
         }
     }
 
-    internal fun parseModuleMetadata(json: String, logger: Logger? = null, baseArtifactId: String? = null): List<TvosVariant> {
-        val variants = mutableListOf<TvosVariant>()
+    internal fun parseModuleMetadata(moduleJson: String, logger: Logger? = null, baseArtifactId: String? = null): List<TvosVariant> {
+        return try {
+            val root = Json.parseToJsonElement(moduleJson).jsonObject
+            val variantsArray = root["variants"]?.jsonArray ?: return emptyList()
 
-        val nativeTargetPattern = Regex(""""org\.jetbrains\.kotlin\.native\.target"\s*:\s*"(tvos_[^"]+)"""")
-        val availableAtModulePattern = Regex(""""available-at"\s*:\s*\{[^}]*"module"\s*:\s*"([^"]+)"""", RegexOption.DOT_MATCHES_ALL)
-        val namePattern = Regex(""""name"\s*:\s*"([^"]+)"""")
-        val attributesBlockPattern = Regex(""""attributes"\s*:\s*\{([^}]*)\}""", RegexOption.DOT_MATCHES_ALL)
-        val attributePairPattern = Regex(""""([^"]+)"\s*:\s*"([^"]+)"""")
+            val variants = mutableListOf<TvosVariant>()
+            for (variantElement in variantsArray) {
+                val variantObject = variantElement.jsonObject
+                val attributesObject = variantObject["attributes"]?.jsonObject ?: continue
 
-        val tvosSections = json.split(Regex("""(?=\{\s*"name"\s*:)""")).filter { it.contains("tvos_") }
+                val nativeTarget = attributesObject["org.jetbrains.kotlin.native.target"]
+                    ?.jsonPrimitive?.content
+                    ?: continue
+                if (!nativeTarget.startsWith("tvos_")) continue
 
-        for (section in tvosSections) {
-            val nameMatch = namePattern.find(section) ?: continue
-            val variantName = nameMatch.groupValues[1]
+                val variantName = variantObject["name"]?.jsonPrimitive?.content ?: continue
 
-            val targetMatch = nativeTargetPattern.find(section) ?: continue
-            val nativeTarget = targetMatch.groupValues[1]
+                // Capture the full attribute map for this variant. The earlier "Api-only"
+                // filter and distinctBy(nativeTarget) produced a single injected variant with
+                // four attributes, which covered kotlin-api requests but silently failed for
+                // consumers whose source-set resolution needed kotlin-metadata / kotlin-runtime
+                // / sources variants (e.g. `appleMain` compileMainKotlinMetadata).
+                // We now mirror every tvOS variant from the fork with its exact attribute set.
+                // Non-string JSON primitives (booleans/numbers) are stringified to their
+                // literal form via JsonPrimitive.content, matching Gradle's own attribute
+                // model where attribute values are always compared/stored as strings here.
+                val attributes = attributesObject.mapValues { (_, value) -> value.jsonPrimitive.content }
 
-            // Capture the full attribute block for this variant. The earlier "Api-only"
-            // filter and distinctBy(nativeTarget) produced a single injected variant with
-            // four attributes, which covered kotlin-api requests but silently failed for
-            // consumers whose source-set resolution needed kotlin-metadata / kotlin-runtime
-            // / sources variants (e.g. `appleMain` compileMainKotlinMetadata).
-            // We now mirror every tvOS variant from the fork with its exact attribute set.
-            val attributes = attributesBlockPattern.find(section)
-                ?.let { blockMatch ->
-                    attributePairPattern.findAll(blockMatch.groupValues[1])
-                        .associate { it.groupValues[1] to it.groupValues[2] }
-                }
-                ?: emptyMap()
-
-            val availableAtMatch = availableAtModulePattern.find(section)
-            val moduleArtifactId = if (availableAtMatch != null) {
-                availableAtMatch.groupValues[1]
-            } else if (baseArtifactId != null) {
+                val moduleArtifactId = variantObject["available-at"]?.jsonObject
+                    ?.get("module")?.jsonPrimitive?.content
                 val targetSuffix = nativeTarget.replace("_", "")
-                "$baseArtifactId-$targetSuffix"
-            } else {
-                nativeTarget.replace("_", "")
+                val artifactId = moduleArtifactId
+                    ?: baseArtifactId?.let { "$it-$targetSuffix" }
+                    ?: targetSuffix
+
+                variants.add(TvosVariant(variantName, nativeTarget, artifactId, attributes))
             }
 
-            variants.add(TvosVariant(variantName, nativeTarget, moduleArtifactId, attributes))
+            // Keep every (name, target) pair — api / sources / metadata / runtime all needed.
+            variants.distinctBy { it.variantName }
+        } catch (e: Exception) {
+            logger?.info("[ComposeTvosRedirect] Failed to parse module metadata: ${e.message}")
+            emptyList()
         }
-
-        // Keep every (name, target) pair — api / sources / metadata / runtime all needed.
-        return variants.distinctBy { it.variantName }
     }
 
-    // Cache format (v2): two lines per variant.
-    //   header: variantName|nativeTarget|artifactId
-    //   attrs:  attrs:key1=value1,key2=value2,...
-    // Attribute keys/values are Gradle attribute names and enum-like strings (no commas/
-    // pipes/equals), so naive delimiting is safe. A malformed file is simply ignored and
-    // the variants are re-fetched from the network.
+    // Cache format (v3): the on-disk cache is a JSON array of TvosVariant, written via
+    // kotlinx-serialization. A malformed/corrupt file (or one from an older bespoke
+    // pipe/comma-delimited v1/v2 format) is simply ignored and the variants are
+    // re-fetched from the network.
     private fun readFromFileCache(cacheDir: File, cacheKey: String): List<TvosVariant>? {
         val cacheFile = getCacheFile(cacheDir, cacheKey)
         if (!cacheFile.exists()) return null
 
         return try {
-            val lines = cacheFile.readLines()
-            val result = mutableListOf<TvosVariant>()
-            var i = 0
-            while (i < lines.size) {
-                val header = lines[i].split("|")
-                if (header.size != 3) { i++; continue }
-                val attrsLine = lines.getOrNull(i + 1).orEmpty()
-                val attributes = if (attrsLine.startsWith("attrs:")) {
-                    attrsLine.removePrefix("attrs:")
-                        .split(",")
-                        .mapNotNull {
-                            val eq = it.indexOf('=')
-                            if (eq > 0) it.substring(0, eq) to it.substring(eq + 1) else null
-                        }
-                        .toMap()
-                } else {
-                    emptyMap()
-                }
-                result.add(TvosVariant(header[0], header[1], header[2], attributes))
-                i += 2
-            }
-            result.takeIf { it.isNotEmpty() }
+            json.decodeFromString<List<TvosVariant>>(cacheFile.readText()).takeIf { it.isNotEmpty() }
         } catch (e: Exception) {
             null
         }
@@ -226,17 +210,7 @@ object TvosVariantDiscovery {
         val cacheFile = getCacheFile(cacheDir, cacheKey)
         try {
             cacheFile.parentFile?.mkdirs()
-            val text = buildString {
-                variants.forEach { v ->
-                    append(v.variantName).append('|')
-                        .append(v.nativeTarget).append('|')
-                        .append(v.artifactId).append('\n')
-                    append("attrs:")
-                        .append(v.attributes.entries.joinToString(",") { "${it.key}=${it.value}" })
-                        .append('\n')
-                }
-            }
-            cacheFile.writeText(text)
+            cacheFile.writeText(json.encodeToString<List<TvosVariant>>(variants))
         } catch (_: Exception) { }
     }
 
