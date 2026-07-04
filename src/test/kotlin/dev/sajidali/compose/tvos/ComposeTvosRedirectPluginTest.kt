@@ -304,6 +304,38 @@ class TvosVariantDiscoveryTest {
         assertTrue(variants.any { it.nativeTarget == "tvos_x64" })
         assertFalse(variants.any { it.nativeTarget == "tvos_simulator_arm64" })
     }
+
+    // -- Task 10b (Phase 4 blocker fix): already-supported native-target extraction ------
+
+    @Test
+    fun `alreadySupportedNativeTargets extracts the native-target set from discovered variants`() {
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64ApiElements",
+              "attributes": { "org.jetbrains.kotlin.native.target": "tvos_arm64" },
+              "available-at": { "module": "runtime-tvosarm64" }
+            },
+            {
+              "name": "tvosArm64MetadataElements",
+              "attributes": { "org.jetbrains.kotlin.native.target": "tvos_arm64" },
+              "available-at": { "module": "runtime-tvosarm64" }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "runtime")
+        val targets = TvosVariantDiscovery.alreadySupportedNativeTargets(variants)
+
+        assertEquals(setOf("tvos_arm64"), targets)
+    }
+
+    @Test
+    fun `alreadySupportedNativeTargets returns an empty set for no variants`() {
+        assertTrue(TvosVariantDiscovery.alreadySupportedNativeTargets(emptyList()).isEmpty())
+    }
 }
 
 class TvosVariantDiscoveryDiskCacheTest {

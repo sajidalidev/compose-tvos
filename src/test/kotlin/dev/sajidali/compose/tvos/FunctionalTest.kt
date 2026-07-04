@@ -438,13 +438,101 @@ class ComposeTvosFunctionalTest {
         )
     }
 
+    // -- Task 10b (Phase 4 blocker fix): skip injection for natively-supported targets ---
+
+    @Test
+    fun `an official module that already ships tvOS variants resolves without ambiguity and skips fork injection`(
+        @TempDir projectDir: File
+    ) {
+        // Mirrors the confirmed-live defect (task-10-report.md, section 4): an official
+        // JetBrains umbrella (here, the fixture standing in for org.jetbrains.compose.runtime)
+        // ALREADY ships a real tvosArm64 variant, and the fork ALSO publishes one at the same
+        // coordinate/target. Before the Task 10b fix, TvosVariantInjectionRule injected the
+        // fork's variant unconditionally, producing an unresolvable Gradle variant-ambiguity
+        // error for this exact resolution (captured red in task-10b-report.md: `runResolve`
+        // itself failed with `UnexpectedBuildFailure` / "cannot choose between ...
+        // tvosArm64ApiElements-published / -published-injected").
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.runtime:runtime:$RUNTIME_VERSION")
+
+        // The build succeeding at all (rather than GradleRunner throwing
+        // UnexpectedBuildFailure, as it did before the fix) IS the primary assertion here.
+        val result = runResolve(projectDir, target = "tvosArm64")
+
+        val resolved = result.resolvedLines()
+        val umbrella = resolved.single { it.contains("org.jetbrains.compose.runtime:runtime:$RUNTIME_VERSION ") }
+        assertFalse(
+            umbrella.contains("-injected"),
+            "the official umbrella must resolve through its own (non-injected) variant now that " +
+                "the target native target is already officially supported -- an '-injected' " +
+                "variant here would mean TvosVariantInjectionRule added the colliding duplicate " +
+                "again; got: $umbrella"
+        )
+        assertTrue(
+            result.output.contains("Skipping 3 tvOS variant(s) already supported by the official artifact") &&
+                result.output.contains("org.jetbrains.compose.runtime:runtime:$RUNTIME_VERSION"),
+            "verbose output must record the already-supported skip for this module (api/metadata/" +
+                "sources variants, all for tvos_arm64); got:\n${result.output}"
+        )
+        assertFalse(
+            result.output.contains("[ComposeTvos] WARNING"),
+            "skipping an already-officially-supported target must never WARN; got:\n${result.output}"
+        )
+        // NOTE (Task 10b concern, see task-10b-report.md): this deliberately does NOT assert
+        // on which coordinate ultimately serves the tvosArm64 artifact. A SEPARATE, pre-
+        // existing mechanism -- ComposeTvosRedirectPlugin's project-level
+        // `dependencySubstitution.all` (out of this task's stated scope: TvosVariantInjectionRule
+        // + TvosVariantDiscovery only) -- unconditionally redirects ANY tvOS-suffixed module
+        // name under a Compose group to the dev.sajidali fork, including the real, official
+        // `runtime-tvosarm64` reached here via the umbrella's own (non-injected) available-at
+        // variant. That is a second, adjacent defect discovered via this fixture, requiring a
+        // change outside this task's file scope; it is documented, not silently fixed here.
+    }
+
+    @Test
+    fun `a mixed graph skips only the module the official artifact already covers`(
+        @TempDir projectDir: File
+    ) {
+        writeConsumerProject(
+            projectDir,
+            dependency = "org.jetbrains.compose.runtime:runtime:$RUNTIME_VERSION",
+            extraDependencies = listOf("org.jetbrains.compose.ui:ui:$COMPOSE_VERSION")
+        )
+
+        val result = runResolve(projectDir, target = "tvosArm64")
+
+        val resolved = result.resolvedLines()
+        val runtimeUmbrella = resolved.single { it.contains("org.jetbrains.compose.runtime:runtime:$RUNTIME_VERSION ") }
+        assertFalse(
+            runtimeUmbrella.contains("-injected"),
+            "runtime must not receive an injected variant once already officially covered; got: $runtimeUmbrella"
+        )
+        val uiUmbrella = resolved.single { it.contains("org.jetbrains.compose.ui:ui:$COMPOSE_VERSION ") }
+        assertContains(
+            uiUmbrella, "-injected",
+            message = "ui must still receive its injected variant (official ui has no tvOS variants " +
+                "in this fixture); got: $uiUmbrella"
+        )
+        assertTrue(
+            resolved.any { it.contains("dev.sajidali.compose.ui:ui-tvosarm64:$COMPOSE_VERSION") },
+            "ui must still resolve through the fork platform module; got:\n${resolved.joinToString("\n")}"
+        )
+        assertFalse(
+            result.output.contains("[ComposeTvos] WARNING"),
+            "a fully-successful mixed resolution must never WARN; got:\n${result.output}"
+        )
+        // See the NOTE in the single-module test above: which coordinate ultimately serves
+        // runtime's tvosArm64 artifact is governed by a separate, out-of-scope mechanism and
+        // is intentionally not asserted here.
+    }
+
     // -- consumer project scaffolding ----------------------------------------------------
 
     private fun writeConsumerProject(
         projectDir: File,
         dependency: String,
         composeTvosConfig: String = """manifestUrl.set("")""",
-        kotlinTargets: List<String> = listOf("tvosArm64", "tvosSimulatorArm64", "iosArm64")
+        kotlinTargets: List<String> = listOf("tvosArm64", "tvosSimulatorArm64", "iosArm64"),
+        extraDependencies: List<String> = emptyList()
     ) {
         projectDir.resolve("settings.gradle.kts").writeText(
             """
@@ -494,6 +582,7 @@ class ComposeTvosFunctionalTest {
 
                 sourceSets.commonMain.dependencies {
                     implementation("$dependency")
+                    ${extraDependencies.joinToString("\n                    ") { "implementation(\"$it\")" }}
                 }
             }
 
@@ -576,6 +665,15 @@ class ComposeTvosFunctionalTest {
          */
         private const val COLD_VERSION = "1.11.0-cold-offline"
 
+        /**
+         * Task 10b (Phase 4 blocker fix): a version at which the OFFICIAL umbrella already
+         * ships a genuine tvosArm64 variant (mirroring the confirmed-live
+         * `org.jetbrains.compose.runtime:runtime:1.12.0-beta01` shape) -- distinct from
+         * [COMPOSE_VERSION] so it can't be confused with the "official has no tvOS" fixtures
+         * the other 71 tests pin.
+         */
+        private const val RUNTIME_VERSION = "1.12.0-beta01"
+
         private val pluginRepo = File(requireNotNull(System.getProperty("functionalTest.pluginRepo")))
         private val pluginVersion = requireNotNull(System.getProperty("functionalTest.pluginVersion"))
         private val testKitDir = File(requireNotNull(System.getProperty("functionalTest.testKitDir")))
@@ -644,6 +742,20 @@ class ComposeTvosFunctionalTest {
                 publishUmbrellaWithPlatforms(
                     "org.jetbrains.compose.ui", "ui", COLD_VERSION,
                     listOf(FixtureNativeTarget.IOS_ARM64)
+                )
+                // Task 10b: official umbrella that ALREADY ships a real tvosArm64 variant
+                // (mirrors the confirmed-live org.jetbrains.compose.runtime:runtime shape) --
+                // the pre-fix ambiguity reproduction. Its own `runtime-tvosarm64` platform
+                // module is published by this same call (available-at target).
+                publishUmbrellaWithPlatforms(
+                    "org.jetbrains.compose.runtime", "runtime", RUNTIME_VERSION,
+                    listOf(FixtureNativeTarget.TVOS_ARM64)
+                )
+                // Fork umbrella + platform module ALSO published at the same target -- the
+                // exact collision TvosVariantInjectionRule must now skip rather than inject.
+                publishUmbrellaWithPlatforms(
+                    "dev.sajidali.compose.runtime", "runtime", RUNTIME_VERSION,
+                    listOf(FixtureNativeTarget.TVOS_ARM64)
                 )
             }
         }

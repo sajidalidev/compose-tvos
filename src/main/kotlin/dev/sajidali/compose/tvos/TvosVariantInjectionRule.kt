@@ -36,10 +36,26 @@ data class EmptyDiscoveryRecord(
     val offline: Boolean
 )
 
+/**
+ * Task 10b (Phase 4 blocker fix): a discovered tvOS variant that was deliberately NOT
+ * injected because the OFFICIAL module (fetched via the same discovery path, keyed by its
+ * own `group:module:version` rather than the redirect target coordinate) already ships a
+ * native variant for that target -- e.g. `org.jetbrains.compose.runtime` already publishes
+ * `tvosArm64` upstream. Recorded for verbose diagnostics only: deliberately NOT an
+ * [EmptyDiscoveryRecord] (discovery succeeded; the module is simply already covered), so it
+ * never contributes to the end-of-build WARN/strictMode path.
+ */
+data class SkippedAlreadySupportedRecord(
+    val sourceModule: String,
+    val targetCoordinate: String,
+    val skippedNativeTargets: List<String>
+)
+
 /** Immutable point-in-time read of [TvosVariantInjectionRule]'s diagnostics bookkeeping. */
 data class DiagnosticsSnapshot(
     val injections: List<InjectionRecord>,
-    val emptyDiscoveries: List<EmptyDiscoveryRecord>
+    val emptyDiscoveries: List<EmptyDiscoveryRecord>,
+    val skippedAlreadySupported: List<SkippedAlreadySupportedRecord> = emptyList()
 )
 
 /**
@@ -109,19 +125,64 @@ abstract class TvosVariantInjectionRule @Inject constructor(
             )
             return
         }
-        injections.putIfAbsent(sourceModule, InjectionRecord(sourceModule, targetCoordinate, variants.size))
+
+        // Task 10b (Phase 4 blocker fix): before injecting, check whether the OFFICIAL module
+        // -- this component's own group:module:version, not the redirect target -- already
+        // ships native tvOS variant(s) for some of the targets just discovered (e.g.
+        // org.jetbrains.compose.runtime already publishes tvosArm64 upstream). Re-uses the
+        // exact same discoverVariants/parseModuleMetadata path, repository list, and
+        // disk/memory caching as the target lookup above, keyed by the OFFICIAL coordinate --
+        // naturally distinct from the target coordinate's own cache key, since the redirect
+        // target always carries a different (dev.sajidali-mapped) group. A failed/empty
+        // official-metadata fetch (offline, network error, or a parse failure on well-formed
+        // metadata) degrades to an empty set here, same as discoverVariants's existing
+        // never-throw contract -- so the fallback is simply "inject everything discovered",
+        // i.e. the previous, unconditional behavior. That fallback is deliberately chosen over
+        // failing closed: injection is only reachable when the TARGET dev.sajidali metadata
+        // was already fetchable, and a wrongly-SKIPPED injection breaks tvOS builds outright,
+        // whereas a wrongly-ADDED injection only breaks the (rare) already-officially-supported
+        // case -- exactly the case this whole check exists to avoid in the common path.
+        val officialVariants = getVariants(group, moduleName, id.version)
+        val alreadySupportedTargets = TvosVariantDiscovery.alreadySupportedNativeTargets(officialVariants)
+        val injectable = variants.filter { it.nativeTarget !in alreadySupportedTargets }
+
+        if (injectable.size < variants.size) {
+            val skippedTargets = variants.filter { it.nativeTarget in alreadySupportedTargets }.map { it.nativeTarget }
+            skippedAlreadySupported.putIfAbsent(
+                sourceModule,
+                SkippedAlreadySupportedRecord(sourceModule, targetCoordinate, skippedTargets)
+            )
+            if (params.verbose) {
+                logger.lifecycle(
+                    "[ComposeTvosRedirect] Skipping ${skippedTargets.size} tvOS variant(s) already " +
+                        "supported by the official artifact: $group:$moduleName:${id.version} ($skippedTargets)"
+                )
+            }
+        }
+
+        if (injectable.isEmpty()) return
+
+        injections.putIfAbsent(sourceModule, InjectionRecord(sourceModule, targetCoordinate, injectable.size))
 
         if (params.verbose) {
-            logger.lifecycle("[ComposeTvosRedirect] Injecting ${variants.size} tvOS variants into: $group:$moduleName:${id.version}")
+            logger.lifecycle("[ComposeTvosRedirect] Injecting ${injectable.size} tvOS variants into: $group:$moduleName:${id.version}")
         }
-        injectTvosVariants(metadata, targetGroup, version, variants)
+        injectTvosVariants(metadata, targetGroup, version, injectable)
     }
 
-    private fun getVariants(targetGroup: String, targetArtifact: String, version: String): List<TvosVariant> {
-        val key = "$targetGroup:$targetArtifact:$version"
+    /**
+     * Fetches (and memoizes) the tvOS variants for `groupId:artifactId:version`, via
+     * [TvosVariantDiscovery.discoverVariants]. Shared by both callers in [execute]: the
+     * redirect TARGET coordinate (dev.sajidali-mapped) and, since Task 10b, the OFFICIAL
+     * coordinate (this component's own identity) used for the already-supported pre-check --
+     * these are always different cache keys, since the mapped target group never equals the
+     * original (JetBrains) group.
+     */
+    private fun getVariants(groupId: String, artifactId: String, version: String): List<TvosVariant> {
+        val key = "$groupId:$artifactId:$version"
         return variantCache.getOrPut(key) {
             TvosVariantDiscovery.discoverVariants(
-                params.repositoryUrls, targetGroup, targetArtifact, version, File(params.cacheDirPath),
+                params.repositoryUrls, groupId, artifactId, version, File(params.cacheDirPath),
                 if (params.verbose) logger else null,
                 offline = params.offline
             )
@@ -195,14 +256,22 @@ abstract class TvosVariantInjectionRule @Inject constructor(
         private val injections = ConcurrentHashMap<String, InjectionRecord>()
         private val emptyDiscoveries = ConcurrentHashMap<String, EmptyDiscoveryRecord>()
 
+        // Task 10b (Phase 4 blocker fix): modules for which one or more discovered tvOS
+        // variants were skipped because the official artifact already ships that native
+        // target. Verbose-only bookkeeping (see the KDoc on SkippedAlreadySupportedRecord) --
+        // deliberately kept separate from emptyDiscoveries so it never feeds the WARN/
+        // strictMode path.
+        private val skippedAlreadySupported = ConcurrentHashMap<String, SkippedAlreadySupportedRecord>()
+
         /** Clears diagnostics bookkeeping; called once per build before the rule can fire. */
         fun resetDiagnostics() {
             injections.clear()
             emptyDiscoveries.clear()
+            skippedAlreadySupported.clear()
         }
 
         /** Point-in-time read of the diagnostics bookkeeping accumulated so far this build. */
         fun diagnosticsSnapshot(): DiagnosticsSnapshot =
-            DiagnosticsSnapshot(injections.values.toList(), emptyDiscoveries.values.toList())
+            DiagnosticsSnapshot(injections.values.toList(), emptyDiscoveries.values.toList(), skippedAlreadySupported.values.toList())
     }
 }

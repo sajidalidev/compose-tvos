@@ -280,6 +280,19 @@ object TvosVariantDiscovery {
     fun clearCache() {
         variantCache.clear()
     }
+
+    /**
+     * Extracts the set of `org.jetbrains.kotlin.native.target` values present in [variants] --
+     * used by [dev.sajidali.compose.tvos.TvosVariantInjectionRule] (Task 10b, Phase 4 blocker
+     * fix) to determine which tvOS native targets an OFFICIAL module already ships upstream
+     * (e.g. `org.jetbrains.compose.runtime` already publishes a real `tvosArm64` variant), so
+     * injection can skip re-adding a colliding variant for those targets rather than producing
+     * an unresolvable Gradle variant-ambiguity error. [variants] is expected to come from the
+     * same [discoverVariants]/[parseModuleMetadata] path used everywhere else -- already
+     * filtered to tvOS-only variants -- so no further filtering is needed here.
+     */
+    fun alreadySupportedNativeTargets(variants: List<TvosVariant>): Set<String> =
+        variants.map { it.nativeTarget }.toSet()
 }
 
 /**
