@@ -1,0 +1,31 @@
+# Weekly (+ manual) guard against manifest/compose-tvos-versions.json drifting out of sync
+# with what's actually published on Maven Central.
+#
+# NOTE: this workflow is written to work AFTER the Phase 5 Central publication of the
+# dev.sajidali.* fork artifacts has gone live -- see .superpowers/sdd/task-11-prep-report.md
+# section 7 for the full ordered pre-publish checklist. Until then, every coordinate this
+# workflow checks is genuinely unpublished, so it is EXPECTED to fail loudly rather than pass
+# silently. `continue-on-error` is deliberately left at its default (false) so that expected
+# pre-publication failure -- and any real drift discovered afterwards -- is always visible.
+name: Check manifest drift
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # every Monday, 06:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  check-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Verify manifest coordinates resolve on Maven Central
+        continue-on-error: false
+        run: python3 .github/scripts/check-manifest-drift.py

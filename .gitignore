@@ -26,3 +26,6 @@ gradle.properties.local
 
 # Test output
 test-output/
+
+# SDD ledger/reports (internal working notes, never published with the repo)
+.superpowers/

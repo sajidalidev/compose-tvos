@@ -1,0 +1,79 @@
+# Tag-triggered release: builds + tests, then publishes to Maven Central (via the vanniktech
+# com.vanniktech.maven.publish 0.30.0 plugin already configured in build.gradle.kts) and to
+# the Gradle Plugin Portal (com.gradle.plugin-publish).
+#
+# Required repository secrets:
+#   MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD
+#       Central Portal user-token username/password (Central Portal account -> "Generate User
+#       Token"). Exposed to Gradle as ORG_GRADLE_PROJECT_mavenCentralUsername /
+#       ORG_GRADLE_PROJECT_mavenCentralPassword -- the exact project properties
+#       com.vanniktech.maven.publish's publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL) (see
+#       build.gradle.kts) reads for Central Portal authentication.
+#   SIGNING_IN_MEMORY_KEY / SIGNING_IN_MEMORY_KEY_PASSWORD / SIGNING_IN_MEMORY_KEY_ID
+#       An ASCII-armored in-memory PGP private key, its passphrase, and (optional -- only
+#       needed for keys with multiple subkeys) its key ID. Exposed as
+#       ORG_GRADLE_PROJECT_signingInMemoryKey(Password|Id) -- the vanniktech-plugin-recognized
+#       properties signAllPublications() (already applied in build.gradle.kts) reads in place
+#       of a local secring/gpg-agent setup.
+#   GRADLE_PUBLISH_KEY / GRADLE_PUBLISH_SECRET
+#       Gradle Plugin Portal API key/secret (plugins.gradle.org account -> API Keys). Read
+#       directly by com.gradle.plugin-publish's `publishPlugins` task under those exact
+#       (unprefixed) environment variable names -- its own documented convention.
+#
+# All of the above publish steps are IRREVERSIBLE once they succeed (neither Central nor the
+# Portal allow un-publishing a given version) -- see .superpowers/sdd/task-11-prep-report.md
+# section 7 for the full ordered pre-publish checklist (smoke-test the fork libraries on
+# Central first, confirm the manifest is live, etc.) that must be satisfied before pushing a
+# tag that triggers this workflow.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Pre-publish guard: the pushed tag (vX.Y.Z) must match gradle.properties' VERSION, so a
+      # forgotten version bump never silently publishes the wrong coordinate.
+      - name: Assert tag version matches gradle.properties VERSION
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          properties_version="$(grep '^VERSION=' gradle.properties | cut -d= -f2)"
+          if [ "$tag_version" != "$properties_version" ]; then
+            echo "Tag $GITHUB_REF_NAME (version $tag_version) does not match gradle.properties VERSION=$properties_version" >&2
+            exit 1
+          fi
+          echo "Tag version $tag_version matches gradle.properties VERSION."
+
+      - name: Build and test
+        run: ./gradlew build --stacktrace
+
+      - name: Publish to Maven Central
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNING_IN_MEMORY_KEY_ID }}
+        run: ./gradlew publishAllPublicationsToMavenCentralRepository --stacktrace
+
+      - name: Publish to Gradle Plugin Portal
+        env:
+          GRADLE_PUBLISH_KEY: ${{ secrets.GRADLE_PUBLISH_KEY }}
+          GRADLE_PUBLISH_SECRET: ${{ secrets.GRADLE_PUBLISH_SECRET }}
+        run: ./gradlew publishPlugins --stacktrace

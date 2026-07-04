@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Gradle 8.13 (this repo's wrapper) runs fine on JDK 17; the plugin itself compiles
+      # against Java 11 (java.sourceCompatibility / kotlin.jvmToolchain(11) in
+      # build.gradle.kts) via Gradle's own toolchain auto-provisioning, independent of the JDK
+      # running Gradle itself.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # The functional-test suite (GradleTestKit) downloads the Kotlin Gradle Plugin
+      # (~300MB) into the shared TestKit home (build/functional-test/testkit, see the `test`
+      # task in build.gradle.kts) on every cold run. Cache it, keyed on the harness's own
+      # pinned KOTLIN_VERSION constant (ComposeTvosFunctionalTest, FunctionalTest.kt) so the
+      # cache is invalidated automatically whenever that version changes.
+      - name: Read functional-test Kotlin version
+        id: kgp
+        run: |
+          version=$(grep -oE 'KOTLIN_VERSION = "[^"]+"' src/test/kotlin/dev/sajidali/compose/tvos/FunctionalTest.kt | cut -d'"' -f2)
+          if [ -z "$version" ]; then
+            echo "Could not find KOTLIN_VERSION constant in FunctionalTest.kt" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache TestKit home
+        uses: actions/cache@v4
+        with:
+          path: build/functional-test/testkit
+          key: testkit-home-kgp-${{ steps.kgp.outputs.version }}
+
+      # Runs both the unit test suite and the GradleTestKit functional suite (both live under
+      # src/test, see build.gradle.kts). Network access beyond the Plugin Portal/Maven Central
+      # (for KGP/stdlib resolution inside the TestKit-driven consumer builds) is not required.
+      - name: Run tests
+        run: ./gradlew test --stacktrace
+
+      - name: Validate version-mapping manifest
+        run: python3 .github/scripts/validate-manifest-json.py
