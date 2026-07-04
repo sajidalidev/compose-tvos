@@ -226,6 +226,111 @@ class ComposeTvosFunctionalTest {
         }
     }
 
+    @Test
+    fun `--offline resolves from warm caches`(
+        @TempDir projectDir: File
+    ) {
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.ui:ui:$COMPOSE_VERSION")
+
+        // Warm: an online resolve (idempotent even if another test already warmed the same
+        // coordinate on the shared daemon) populates both the plugin's on-disk discovery
+        // cache and, on whichever daemon services it, the in-memory one.
+        val warm = runResolve(projectDir, target = "tvosArm64")
+        assertTrue(
+            warm.resolvedLines().any { it.contains("dev.sajidali.compose.ui:ui-tvosarm64:$COMPOSE_VERSION") },
+            "warm run must resolve the fork platform module before testing --offline; got:\n${warm.output}"
+        )
+
+        // Warm + --offline: same shared daemon/testKitDir as the warm run above, so both the
+        // in-memory and on-disk caches are already populated — resolution must still
+        // succeed purely from those caches, with no network access.
+        val warmOffline = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("resolveGraph", "-PresolveTarget=tvosArm64", "--console=plain", "--offline")
+            .build()
+        assertTrue(
+            warmOffline.resolvedLines().any { it.contains("dev.sajidali.compose.ui:ui-tvosarm64:$COMPOSE_VERSION") },
+            "warm --offline run must still resolve the fork platform module from caches; got:\n${warmOffline.output}"
+        )
+    }
+
+    @Test
+    fun `--offline fails gracefully when the plugin has never seen the coordinate before`(
+        @TempDir warmupProjectDir: File,
+        @TempDir projectDir: File
+    ) {
+        // Warm up Gradle's own tooling classpath (Kotlin Gradle plugin, stdlib, our plugin's
+        // marker jars) with the well-established COMPOSE_VERSION coordinate, so this test is
+        // independent of JUnit's execution order relative to the other functional tests for
+        // the shared testKitDir to already have that classpath cached.
+        writeConsumerProject(warmupProjectDir, dependency = "org.jetbrains.compose.ui:ui:$COMPOSE_VERSION")
+        runResolve(warmupProjectDir, target = "tvosArm64")
+
+        // COLD_VERSION is published (upstream-only, no fork counterpart) and never requested
+        // by any other test in the suite: neither the plugin's on-disk discovery cache nor
+        // the shared daemon's in-memory `TvosVariantInjectionRule`/`TvosVariantDiscovery`
+        // companion-object cache — nor, it turns out, Gradle's OWN per-target module
+        // resolution cache — has ever seen it, so --offline resolution fails cleanly at the
+        // base dependency itself (confirmed: an online warm-up resolve of this exact
+        // coordinate for a DIFFERENT target, iosArm64, does not make it offline-resolvable
+        // for tvosArm64's separate resolvable configuration). That is still exactly the
+        // graceful, non-crashing degrade the brief asks for: resolution fails for the tvOS
+        // dependency rather than the plugin throwing or silently fabricating a variant.
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.ui:ui:$COLD_VERSION")
+
+        val cold = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("resolveGraph", "-PresolveTarget=tvosArm64", "--console=plain", "--offline")
+            .buildAndFail()
+
+        assertFalse(
+            cold.output.contains("dev.sajidali"),
+            "cold --offline run must not inject or resolve any fork coordinate; got:\n${cold.output}"
+        )
+        assertTrue(
+            cold.output.contains("Could not resolve"),
+            "cold --offline run must fail with a normal, non-crashing Gradle resolution error " +
+                "(no network access was available to discover a tvOS variant), not a plugin crash; " +
+                "got:\n${cold.output}"
+        )
+    }
+
+    @Test
+    fun `--configuration-cache is reused across runs and still resolves the injected coordinate`(
+        @TempDir projectDir: File
+    ) {
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.ui:ui:$COMPOSE_VERSION")
+
+        fun run(): BuildResult = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("resolveGraph", "-PresolveTarget=tvosArm64", "--console=plain", "--configuration-cache")
+            .build()
+
+        val first = run()
+        assertTrue(
+            first.output.contains("Configuration cache entry stored"),
+            "first run must store a configuration cache entry; got:\n${first.output}"
+        )
+        assertTrue(
+            first.resolvedLines().any { it.contains("dev.sajidali.compose.ui:ui-tvosarm64:$COMPOSE_VERSION") },
+            "first run must resolve the fork platform module; got:\n${first.output}"
+        )
+
+        val second = run()
+        assertTrue(
+            second.output.contains("Reusing configuration cache") ||
+                second.output.contains("Configuration cache entry reused"),
+            "second run must reuse the stored configuration cache entry; got:\n${second.output}"
+        )
+        assertTrue(
+            second.resolvedLines().any { it.contains("dev.sajidali.compose.ui:ui-tvosarm64:$COMPOSE_VERSION") },
+            "second (cache-reused) run must still resolve the fork platform module; got:\n${second.output}"
+        )
+    }
+
     // -- consumer project scaffolding ----------------------------------------------------
 
     private fun writeConsumerProject(
@@ -268,6 +373,8 @@ class ComposeTvosFunctionalTest {
 
         projectDir.resolve("build.gradle.kts").writeText(
             """
+            import org.gradle.api.artifacts.result.ResolvedComponentResult
+            import org.gradle.api.artifacts.result.ResolvedDependencyResult
             import org.gradle.api.artifacts.result.UnresolvedDependencyResult
 
             plugins {
@@ -284,21 +391,42 @@ class ComposeTvosFunctionalTest {
                 }
             }
 
+            // Configuration-cache-compatible resolution reporting: the target configuration
+            // name and user.home are resolved at CONFIGURATION time (plain local values, not
+            // read from `project`/`Task.project` inside `doLast`). The dependency graph itself
+            // is captured via `resolutionResult.rootComponent` (a lazy `Provider`) instead of
+            // the eager `ResolutionResult.allComponents`/`allDependencies`, and artifacts via
+            // the `ArtifactCollection` reference itself (`config.incoming.artifacts`) rather
+            // than its already-resolved `Set<ResolvedArtifactResult>` -- capturing either the
+            // raw `Configuration` or a realized `Set<ResolvedArtifactResult>` in the task fails
+            // configuration cache storage (`DefaultUnlockedConfiguration` /
+            // `DefaultResolvedArtifactResult ... not supported`). The graph is walked manually
+            // from the root to reproduce the previous `allComponents`/`allDependencies` semantics.
             tasks.register("resolveGraph") {
+                val targetName = providers.gradleProperty("resolveTarget").get()
+                val config = configurations.getByName("${'$'}{targetName}CompileKlibraries")
+                val rootComponent = config.incoming.resolutionResult.rootComponent
+                val artifactCollection = config.incoming.artifacts
+                val userHome = System.getProperty("user.home")
                 doLast {
-                    println("USERHOME> " + System.getProperty("user.home"))
-                    val targetName = project.property("resolveTarget") as String
-                    val config = configurations.getByName("${'$'}{targetName}CompileKlibraries")
-                    val result = config.incoming.resolutionResult
-                    result.allDependencies.forEach { d ->
-                        if (d is UnresolvedDependencyResult) {
-                            throw GradleException("UNRESOLVED: ${'$'}{d.attempted.displayName}: ${'$'}{d.failure}")
+                    println("USERHOME> ${'$'}userHome")
+
+                    val allComponents = linkedSetOf<ResolvedComponentResult>()
+                    fun walk(component: ResolvedComponentResult) {
+                        if (!allComponents.add(component)) return
+                        component.dependencies.forEach { d ->
+                            if (d is UnresolvedDependencyResult) {
+                                throw GradleException("UNRESOLVED: ${'$'}{d.attempted.displayName}: ${'$'}{d.failure}")
+                            }
+                            if (d is ResolvedDependencyResult) walk(d.selected)
                         }
                     }
-                    result.allComponents.forEach { c ->
+                    walk(rootComponent.get())
+
+                    allComponents.forEach { c ->
                         println("RESOLVED> ${'$'}{c.id.displayName} :: ${'$'}{c.variants.joinToString(",") { it.displayName }}")
                     }
-                    config.incoming.artifacts.artifacts.forEach { a ->
+                    artifactCollection.forEach { a ->
                         println("ARTIFACT> ${'$'}{a.id.componentIdentifier.displayName} :: ${'$'}{a.file.name}")
                     }
                 }
@@ -333,6 +461,14 @@ class ComposeTvosFunctionalTest {
 
         /** A version with no fixture fork published at it — only reachable via mapping. */
         private const val UNMAPPED_VERSION = "9.9.9"
+
+        /**
+         * A version with only an upstream (iOS-only) umbrella published, never requested by
+         * any other test — used to exercise a genuinely cold plugin discovery cache (both
+         * on-disk and the shared daemon's in-memory `TvosVariantInjectionRule`/
+         * `TvosVariantDiscovery` companion-object cache) under `--offline`.
+         */
+        private const val COLD_VERSION = "1.11.0-cold-offline"
 
         private val pluginRepo = File(requireNotNull(System.getProperty("functionalTest.pluginRepo")))
         private val pluginVersion = requireNotNull(System.getProperty("functionalTest.pluginVersion"))
@@ -395,6 +531,13 @@ class ComposeTvosFunctionalTest {
                 publishUmbrellaWithPlatforms(
                     "dev.sajidali.androidx.lifecycle", "lifecycle-runtime", COMPOSE_VERSION,
                     listOf(FixtureNativeTarget.TVOS_ARM64, FixtureNativeTarget.TVOS_SIMULATOR_ARM64)
+                )
+                // Cold-offline scenario: upstream-only (iOS-only), deliberately no fork
+                // counterpart published — --offline discovery must never reach the network
+                // to find out either way, so its absence is irrelevant to what's being tested.
+                publishUmbrellaWithPlatforms(
+                    "org.jetbrains.compose.ui", "ui", COLD_VERSION,
+                    listOf(FixtureNativeTarget.IOS_ARM64)
                 )
             }
         }

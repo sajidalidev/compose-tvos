@@ -42,12 +42,14 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
 
         settings.gradle.settingsEvaluated { evaluatedSettings ->
             val verbose = extension.verbose.get()
+            val offline = evaluatedSettings.gradle.startParameter.isOffline
             val repositoryUrls = collectRepositoryUrls(evaluatedSettings, extension)
             val manifestMappings = VersionManifestLoader.load(
                 manifestUrl = extension.manifestUrl.orNull,
                 cacheDir = cacheRoot,
                 refreshDependencies = evaluatedSettings.gradle.startParameter.isRefreshDependencies,
-                logger = if (verbose) logger else null
+                logger = if (verbose) logger else null,
+                offline = offline
             )
 
             if (verbose) {
@@ -57,7 +59,7 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
                 logger.lifecycle("[ComposeTvosRedirect] Loaded ${manifestMappings.size} version override(s) from manifest")
             }
 
-            configureComponentMetadataRules(evaluatedSettings, extension, repositoryUrls, manifestMappings, cacheRoot)
+            configureComponentMetadataRules(evaluatedSettings, extension, repositoryUrls, manifestMappings, cacheRoot, offline)
 
             val config = PluginConfiguration(
                 verbose = extension.verbose.get(),
@@ -105,7 +107,8 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         extension: ComposeTvosRedirectSettingsExtension,
         repositoryUrls: List<String>,
         manifestMappings: Map<String, String>,
-        cacheDir: File
+        cacheDir: File,
+        offline: Boolean
     ) {
         val verbose = extension.verbose.get()
         val targetVersionOverride = extension.targetVersion.orNull
@@ -142,109 +145,23 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         }
         groupMappings.putAll(additionalGroups)
 
-        // Variant cache
-        val variantCache = mutableMapOf<String, List<TvosVariant>>()
+        val params = TvosVariantInjectionRule.Params(
+            groupMappings = groupMappings,
+            artifactMappings = artifactMappings,
+            versionMappings = versionMappings,
+            targetVersionOverride = targetVersionOverride,
+            repositoryUrls = repositoryUrls,
+            cacheDirPath = cacheDir.absolutePath,
+            offline = offline,
+            verbose = verbose
+        )
 
-        fun getVariants(targetGroup: String, targetArtifact: String, version: String): List<TvosVariant> {
-            val key = "$targetGroup:$targetArtifact:$version"
-            return variantCache.getOrPut(key) {
-                TvosVariantDiscovery.discoverVariants(
-                    repositoryUrls, targetGroup, targetArtifact, version, cacheDir,
-                    if (verbose) logger else null
-                )
-            }
-        }
-
-        // Register rules for artifact mappings
-        artifactMappings.forEach { (sourceCoordinate, targetPair) ->
-            val (sourceGroup, sourceArtifact) = sourceCoordinate.split(":")
-            val (targetGroup, targetArtifact) = targetPair
-
-            settings.dependencyResolutionManagement.components.withModule("$sourceGroup:$sourceArtifact") { metadata ->
-                val id = metadata.id
-                if (TvosArtifactMapping.isUmbrellaModule(id.module.name)) {
-                    val version = ComposeVersions.resolveVersion(
-                        id.group, id.module.name, id.version, versionMappings, targetVersionOverride
-                    )
-                    val variants = getVariants(targetGroup, targetArtifact, version)
-                    if (variants.isNotEmpty()) {
-                        if (verbose) {
-                            logger.lifecycle("[ComposeTvosRedirect] Injecting ${variants.size} tvOS variants into: ${id.group}:${id.module.name}:${id.version}")
-                        }
-                        injectTvosVariants(metadata, targetGroup, version, variants)
-                    }
-                }
-            }
-        }
-
-        // Register rules for group mappings
-        groupMappings.forEach { (sourceGroup, targetGroup) ->
-            settings.dependencyResolutionManagement.components.all { metadata ->
-                val id = metadata.id
-                val moduleName = id.module.name
-                val artifactKey = "${id.group}:$moduleName"
-
-                if (artifactMappings.containsKey(artifactKey)) return@all
-
-                if (id.group == sourceGroup && TvosArtifactMapping.isUmbrellaModule(moduleName)) {
-                    val version = ComposeVersions.resolveVersion(
-                        id.group, moduleName, id.version, versionMappings, targetVersionOverride
-                    )
-                    val variants = getVariants(targetGroup, moduleName, version)
-                    if (variants.isNotEmpty()) {
-                        if (verbose) {
-                            logger.lifecycle("[ComposeTvosRedirect] Injecting ${variants.size} tvOS variants into: ${id.group}:$moduleName:${id.version}")
-                        }
-                        injectTvosVariants(metadata, targetGroup, version, variants)
-                    }
-                }
-            }
+        settings.dependencyResolutionManagement.components.all(TvosVariantInjectionRule::class.java) {
+            it.params(params)
         }
 
         if (verbose) {
             logger.lifecycle("[ComposeTvosRedirect] Component metadata rules configured")
-        }
-    }
-
-    private fun injectTvosVariants(
-        metadata: org.gradle.api.artifacts.ComponentMetadataDetails,
-        targetGroup: String,
-        version: String,
-        variants: List<TvosVariant>
-    ) {
-        variants.forEach { variant ->
-            metadata.addVariant("${variant.variantName}-injected") { variantMetadata ->
-                variantMetadata.attributes { attrs ->
-                    val attributesToApply = if (variant.attributes.isNotEmpty()) {
-                        variant.attributes
-                    } else {
-                        // Fallback for cache entries predating attribute capture. This
-                        // covers the common kotlin-api request path but does NOT cover
-                        // metadata / sources / runtime variant lookups — if a consumer
-                        // reports unresolved references in a shared source set (e.g.
-                        // `appleMain`) after upgrading, deleting the cache directory
-                        // (<gradleUserHome>/compose-tvos-redirect-cache-v3/, `~/.gradle` by
-                        // default) forces re-discovery
-                        // with the full attribute set.
-                        mapOf(
-                            "org.gradle.category" to "library",
-                            "org.gradle.usage" to "kotlin-api",
-                            "org.gradle.jvm.environment" to "non-jvm",
-                            "org.jetbrains.kotlin.platform.type" to "native",
-                            "org.jetbrains.kotlin.native.target" to variant.nativeTarget
-                        )
-                    }
-                    attributesToApply.forEach { (key, value) ->
-                        attrs.attribute(
-                            org.gradle.api.attributes.Attribute.of(key, String::class.java),
-                            value
-                        )
-                    }
-                }
-                variantMetadata.withDependencies { deps ->
-                    deps.add("$targetGroup:${variant.artifactId}:$version")
-                }
-            }
         }
     }
 

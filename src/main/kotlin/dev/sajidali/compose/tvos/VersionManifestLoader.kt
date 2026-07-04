@@ -44,7 +44,8 @@ internal object VersionManifestLoader {
         manifestUrl: String?,
         cacheDir: File,
         refreshDependencies: Boolean,
-        logger: Logger? = null
+        logger: Logger? = null,
+        offline: Boolean = false
     ): Map<String, String> {
         if (manifestUrl.isNullOrBlank()) return emptyMap()
 
@@ -55,6 +56,22 @@ internal object VersionManifestLoader {
 
         if (cacheFresh) {
             parse(cacheFile.readText(), logger)?.let { return it }
+        }
+
+        if (offline) {
+            // Never fetch while offline: fresh-or-stale cache is used if present at all,
+            // otherwise degrade to the same-version convention (empty mappings).
+            if (cacheFile.exists()) {
+                parse(cacheFile.readText(), logger)?.let {
+                    logger?.info("[ComposeTvosRedirect] Offline: using cached version manifest (network skipped)")
+                    return it
+                }
+            }
+            logger?.info(
+                "[ComposeTvosRedirect] Offline: no cached version manifest available; " +
+                    "falling back to same-version convention"
+            )
+            return emptyMap()
         }
 
         val fetched = fetch(manifestUrl, logger)

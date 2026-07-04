@@ -58,13 +58,22 @@ object TvosVariantDiscovery {
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    /**
+     * @param offline When true, only the in-memory/disk caches are consulted — no network
+     * connection is ever opened. A SNAPSHOT version (which never populates the disk cache,
+     * see below) with no in-memory entry therefore resolves to an empty list while offline,
+     * mirroring `--offline`'s "do not touch the network" contract; the miss is logged at
+     * info level rather than failing the build (same degrade-gracefully convention as the
+     * network-failure path below).
+     */
     fun discoverVariants(
         repositoryUrls: List<String>,
         groupId: String,
         artifactId: String,
         version: String,
         cacheDir: File?,
-        logger: Logger? = null
+        logger: Logger? = null,
+        offline: Boolean = false
     ): List<TvosVariant> {
         val cacheKey = "$groupId:$artifactId:$version"
 
@@ -75,6 +84,11 @@ object TvosVariantDiscovery {
                 variantCache[cacheKey] = it
                 return it
             }
+        }
+
+        if (offline) {
+            logger?.info("[ComposeTvosRedirect] Offline: no cached tvOS variants for $cacheKey; skipping network fetch")
+            return emptyList()
         }
 
         var variants: List<TvosVariant> = emptyList()
@@ -132,16 +146,42 @@ object TvosVariantDiscovery {
         }
     }
 
-    private fun fetchFromHttpUrl(moduleUrl: String, artifactId: String, logger: Logger?): List<TvosVariant> {
-        val connection = URL(moduleUrl).openConnection() as HttpURLConnection
-        connection.connectTimeout = 5_000
-        connection.readTimeout = 5_000
-        connection.requestMethod = "GET"
+    // Redirects are followed manually (rather than relying on
+    // HttpURLConnection.instanceFollowRedirects, which is already true by default) because
+    // the JDK deliberately refuses to auto-follow a redirect that changes protocol
+    // (http <-> https) — a real scenario for repositories migrating to https. JVM/system
+    // http(s).proxyHost/proxyPort properties are honored automatically by
+    // HttpURLConnection; no extra wiring is required for that.
+    private const val MAX_REDIRECTS = 3
 
-        return if (connection.responseCode == 200) {
-            parseModuleMetadata(connection.inputStream.bufferedReader().readText(), logger, artifactId)
-        } else {
-            emptyList()
+    private fun fetchFromHttpUrl(moduleUrl: String, artifactId: String, logger: Logger?): List<TvosVariant> {
+        var currentUrl = moduleUrl
+        var hops = 0
+        while (true) {
+            val connection = URL(currentUrl).openConnection() as HttpURLConnection
+            connection.connectTimeout = 5_000
+            connection.readTimeout = 5_000
+            connection.requestMethod = "GET"
+            connection.instanceFollowRedirects = false
+
+            val responseCode = connection.responseCode
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                return parseModuleMetadata(connection.inputStream.bufferedReader().readText(), logger, artifactId)
+            }
+
+            val isRedirect = responseCode == HttpURLConnection.HTTP_MOVED_PERM ||
+                responseCode == HttpURLConnection.HTTP_MOVED_TEMP ||
+                responseCode == HttpURLConnection.HTTP_SEE_OTHER ||
+                responseCode == 307 || responseCode == 308
+            if (!isRedirect || hops >= MAX_REDIRECTS) {
+                // Any other non-200 terminal status (404, 5xx, or a redirect with no more
+                // hops left) is treated as a miss, same as before.
+                return emptyList()
+            }
+
+            val location = connection.getHeaderField("Location") ?: return emptyList()
+            currentUrl = URL(URL(currentUrl), location).toString()
+            hops++
         }
     }
 
