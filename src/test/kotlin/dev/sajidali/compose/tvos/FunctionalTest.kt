@@ -459,6 +459,7 @@ class ComposeTvosFunctionalTest {
         val result = runResolve(projectDir, target = "tvosArm64")
 
         val resolved = result.resolvedLines()
+        val artifacts = result.artifactLines()
         val umbrella = resolved.single { it.contains("org.jetbrains.compose.runtime:runtime:$RUNTIME_VERSION ") }
         assertFalse(
             umbrella.contains("-injected"),
@@ -467,6 +468,32 @@ class ComposeTvosFunctionalTest {
                 "variant here would mean TvosVariantInjectionRule added the colliding duplicate " +
                 "again; got: $umbrella"
         )
+        // Task 10b follow-up (Fix 1, review of task-10b-report.md §5): this is the brief's
+        // original, previously-unachievable acceptance criterion, now restored -- resolution
+        // must land on the OFFICIAL runtime-tvosarm64 platform module (reached via the
+        // umbrella's own available-at edge), with NO dev.sajidali runtime node anywhere in the
+        // graph. Before Fix 1, ComposeTvosRedirectPlugin's project-level
+        // dependencySubstitution.all unconditionally hijacked that exact edge back to the fork
+        // even though the injection-rule fix alone had already made the umbrella resolve
+        // correctly.
+        assertTrue(
+            resolved.any { it.contains("org.jetbrains.compose.runtime:runtime-tvosarm64:$RUNTIME_VERSION") },
+            "graph must resolve through the OFFICIAL runtime-tvosarm64 platform module; got:\n${resolved.joinToString("\n")}"
+        )
+        assertTrue(
+            artifacts.any {
+                it.contains("org.jetbrains.compose.runtime:runtime-tvosarm64:$RUNTIME_VERSION") &&
+                    it.contains("runtime-tvosarm64-$RUNTIME_VERSION.klib")
+            },
+            "artifacts must come from the OFFICIAL platform module; got:\n${artifacts.joinToString("\n")}"
+        )
+        (resolved + artifacts).forEach { line ->
+            assertFalse(
+                line.contains("dev.sajidali.compose.runtime"),
+                "no dev.sajidali runtime node may appear once the official artifact already " +
+                    "supports this target: $line"
+            )
+        }
         assertTrue(
             result.output.contains("Skipping 3 tvOS variant(s) already supported by the official artifact") &&
                 result.output.contains("org.jetbrains.compose.runtime:runtime:$RUNTIME_VERSION"),
@@ -477,15 +504,6 @@ class ComposeTvosFunctionalTest {
             result.output.contains("[ComposeTvos] WARNING"),
             "skipping an already-officially-supported target must never WARN; got:\n${result.output}"
         )
-        // NOTE (Task 10b concern, see task-10b-report.md): this deliberately does NOT assert
-        // on which coordinate ultimately serves the tvosArm64 artifact. A SEPARATE, pre-
-        // existing mechanism -- ComposeTvosRedirectPlugin's project-level
-        // `dependencySubstitution.all` (out of this task's stated scope: TvosVariantInjectionRule
-        // + TvosVariantDiscovery only) -- unconditionally redirects ANY tvOS-suffixed module
-        // name under a Compose group to the dev.sajidali fork, including the real, official
-        // `runtime-tvosarm64` reached here via the umbrella's own (non-injected) available-at
-        // variant. That is a second, adjacent defect discovered via this fixture, requiring a
-        // change outside this task's file scope; it is documented, not silently fixed here.
     }
 
     @Test
@@ -512,17 +530,51 @@ class ComposeTvosFunctionalTest {
             message = "ui must still receive its injected variant (official ui has no tvOS variants " +
                 "in this fixture); got: $uiUmbrella"
         )
+        // In ONE resolution: ui goes to the fork (official ui has no tvOS variants), runtime
+        // stays official (official runtime already ships tvos_arm64) -- the brief's mixed-case
+        // acceptance criterion, now restored by Fix 1.
         assertTrue(
             resolved.any { it.contains("dev.sajidali.compose.ui:ui-tvosarm64:$COMPOSE_VERSION") },
             "ui must still resolve through the fork platform module; got:\n${resolved.joinToString("\n")}"
+        )
+        assertTrue(
+            resolved.any { it.contains("org.jetbrains.compose.runtime:runtime-tvosarm64:$RUNTIME_VERSION") },
+            "runtime must resolve through the OFFICIAL platform module; got:\n${resolved.joinToString("\n")}"
+        )
+        assertFalse(
+            resolved.any { it.contains("dev.sajidali.compose.runtime") },
+            "no dev.sajidali runtime node may appear in this mixed graph; got:\n${resolved.joinToString("\n")}"
         )
         assertFalse(
             result.output.contains("[ComposeTvos] WARNING"),
             "a fully-successful mixed resolution must never WARN; got:\n${result.output}"
         )
-        // See the NOTE in the single-module test above: which coordinate ultimately serves
-        // runtime's tvosArm64 artifact is governed by a separate, out-of-scope mechanism and
-        // is intentionally not asserted here.
+    }
+
+    @Test
+    fun `a direct dependency on an officially-supported tvOS-suffixed coordinate is not substituted`(
+        @TempDir projectDir: File
+    ) {
+        // Task 10b follow-up (Fix 1): exercises the dependencySubstitution branch directly
+        // (rather than only via an umbrella's available-at edge) -- a consumer requesting the
+        // tvOS-suffixed platform module coordinate outright must still resolve to the OFFICIAL
+        // artifact once it's known to already support that target, not be unconditionally
+        // hijacked to the fork the way `ui-tvosarm64` legitimately is in the sibling test below.
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.runtime:runtime-tvosarm64:$RUNTIME_VERSION")
+
+        val result = runResolve(projectDir, target = "tvosArm64")
+
+        val resolved = result.resolvedLines()
+        assertTrue(
+            resolved.any { it.contains("org.jetbrains.compose.runtime:runtime-tvosarm64:$RUNTIME_VERSION") },
+            "a direct dependency on an officially-supported tvOS-suffixed module must resolve to " +
+                "the OFFICIAL coordinate, unsubstituted; got:\n${resolved.joinToString("\n")}"
+        )
+        assertFalse(
+            resolved.any { it.contains("dev.sajidali.compose.runtime") },
+            "the fork coordinate must never appear once the official artifact already covers " +
+                "this target; got:\n${resolved.joinToString("\n")}"
+        )
     }
 
     // -- consumer project scaffolding ----------------------------------------------------

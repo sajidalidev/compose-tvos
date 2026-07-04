@@ -101,20 +101,44 @@ object TvosVariantDiscovery {
             return emptyList()
         }
 
-        var variants: List<TvosVariant> = emptyList()
+        // Task 10b follow-up (Fix 2, review of task-10b-report.md): a repository returning and
+        // parsing a .module successfully -- even with ZERO tvOS variants inside it, the majority
+        // case for an official JetBrains artifact -- is a genuine, cacheable answer, distinct
+        // from a fetch FAILURE (network error, 404 on every repository, or a parse exception on
+        // malformed content), which must remain retryable on a later call/build rather than
+        // silently freezing a transient failure into "permanently empty". `fetchAndParseMetadata`
+        // therefore returns a `FetchOutcome` rather than a bare (ambiguous) `List<TvosVariant>`.
+        // The loop stops at the first SUCCESSFUL parse (whether empty or not): once one
+        // repository has genuinely answered for this coordinate, trying further mirror
+        // repositories for the identical group:artifact:version cannot change that answer, and
+        // this also means the common "official artifact has no tvOS variants" case now costs a
+        // single repository round-trip instead of one per configured repository.
         for (repoUrl in repositoryUrls) {
-            variants = fetchAndParseMetadata(repoUrl, groupId, artifactId, version, logger)
-            if (variants.isNotEmpty()) break
-        }
-
-        if (variants.isNotEmpty()) {
-            variantCache[cacheKey] = variants
-            if (!version.contains("SNAPSHOT") && cacheDir != null) {
-                writeToFileCache(cacheDir, cacheKey, variants)
+            val outcome = fetchAndParseMetadata(repoUrl, groupId, artifactId, version, logger)
+            if (outcome is FetchOutcome.Success) {
+                variantCache[cacheKey] = outcome.variants
+                if (!version.contains("SNAPSHOT") && cacheDir != null) {
+                    writeToFileCache(cacheDir, cacheKey, outcome.variants)
+                }
+                return outcome.variants
             }
         }
 
-        return variants
+        return emptyList()
+    }
+
+    /**
+     * The outcome of attempting to fetch and parse a single repository's `.module` file for one
+     * `group:artifact:version` coordinate. [Success] (with a possibly-empty [Success.variants])
+     * is cacheable -- a repository was actually reached and its content actually parsed.
+     * [Failure] covers everything that should be retried later instead of memoized: the
+     * coordinate not existing on this repository (404 / missing file), a network/IO error, or a
+     * parse exception on content that was fetched but could not be understood as valid module
+     * metadata.
+     */
+    private sealed class FetchOutcome {
+        data class Success(val variants: List<TvosVariant>) : FetchOutcome()
+        data object Failure : FetchOutcome()
     }
 
     private fun fetchAndParseMetadata(
@@ -123,7 +147,7 @@ object TvosVariantDiscovery {
         artifactId: String,
         version: String,
         logger: Logger?
-    ): List<TvosVariant> {
+    ): FetchOutcome {
         val baseUrl = repositoryUrl.trimEnd('/')
         val groupPath = groupId.replace('.', '/')
         val modulePath = "$groupPath/$artifactId/$version/$artifactId-$version.module"
@@ -136,11 +160,11 @@ object TvosVariantDiscovery {
             }
         } catch (e: Exception) {
             logger?.info("[ComposeTvosRedirect] Failed to fetch metadata: ${e.message}")
-            emptyList()
+            FetchOutcome.Failure
         }
     }
 
-    private fun fetchFromFileUrl(baseUrl: String, modulePath: String, artifactId: String, logger: Logger?): List<TvosVariant> {
+    private fun fetchFromFileUrl(baseUrl: String, modulePath: String, artifactId: String, logger: Logger?): FetchOutcome {
         val basePath = baseUrl.removePrefix("file:").trimStart('/')
         val absolutePath = if (baseUrl.startsWith("file:///") || baseUrl.startsWith("file:/") && !baseUrl.startsWith("file://")) {
             "/$basePath"
@@ -150,9 +174,9 @@ object TvosVariantDiscovery {
         val moduleFile = File(absolutePath, modulePath)
 
         return if (moduleFile.exists() && moduleFile.isFile) {
-            parseModuleMetadata(moduleFile.readText(), logger, artifactId)
+            parseModuleMetadataOutcome(moduleFile.readText(), logger, artifactId)
         } else {
-            emptyList()
+            FetchOutcome.Failure
         }
     }
 
@@ -164,7 +188,7 @@ object TvosVariantDiscovery {
     // HttpURLConnection; no extra wiring is required for that.
     private const val MAX_REDIRECTS = 3
 
-    private fun fetchFromHttpUrl(moduleUrl: String, artifactId: String, logger: Logger?): List<TvosVariant> {
+    private fun fetchFromHttpUrl(moduleUrl: String, artifactId: String, logger: Logger?): FetchOutcome {
         var currentUrl = moduleUrl
         var hops = 0
         while (true) {
@@ -176,7 +200,7 @@ object TvosVariantDiscovery {
 
             val responseCode = connection.responseCode
             if (responseCode == HttpURLConnection.HTTP_OK) {
-                return parseModuleMetadata(connection.inputStream.bufferedReader().readText(), logger, artifactId)
+                return parseModuleMetadataOutcome(connection.inputStream.bufferedReader().readText(), logger, artifactId)
             }
 
             val isRedirect = responseCode == HttpURLConnection.HTTP_MOVED_PERM ||
@@ -186,67 +210,94 @@ object TvosVariantDiscovery {
             if (!isRedirect || hops >= MAX_REDIRECTS) {
                 // Any other non-200 terminal status (404, 5xx, or a redirect with no more
                 // hops left) is treated as a miss, same as before.
-                return emptyList()
+                return FetchOutcome.Failure
             }
 
-            val location = connection.getHeaderField("Location") ?: return emptyList()
+            val location = connection.getHeaderField("Location") ?: return FetchOutcome.Failure
             currentUrl = URL(URL(currentUrl), location).toString()
             hops++
         }
     }
 
-    internal fun parseModuleMetadata(moduleJson: String, logger: Logger? = null, baseArtifactId: String? = null): List<TvosVariant> {
-        return try {
-            val root = Json.parseToJsonElement(moduleJson).jsonObject
-            val variantsArray = root["variants"]?.jsonArray ?: return emptyList()
-
-            val variants = mutableListOf<TvosVariant>()
-            for (variantElement in variantsArray) {
-                // Each variant is parsed independently: a single malformed entry (e.g. a
-                // non-object array element, or an attribute value that isn't a JSON primitive)
-                // must only drop that variant, not the whole document — mirroring the
-                // per-section degradation the old regex-based parser had.
-                try {
-                    val variantObject = variantElement.jsonObject
-                    val attributesObject = variantObject["attributes"]?.jsonObject ?: continue
-
-                    val nativeTarget = attributesObject["org.jetbrains.kotlin.native.target"]
-                        ?.jsonPrimitive?.content
-                        ?: continue
-                    if (!nativeTarget.startsWith("tvos_")) continue
-
-                    val variantName = variantObject["name"]?.jsonPrimitive?.content ?: continue
-
-                    // Capture the full attribute map for this variant. The earlier "Api-only"
-                    // filter and distinctBy(nativeTarget) produced a single injected variant with
-                    // four attributes, which covered kotlin-api requests but silently failed for
-                    // consumers whose source-set resolution needed kotlin-metadata / kotlin-runtime
-                    // / sources variants (e.g. `appleMain` compileMainKotlinMetadata).
-                    // We now mirror every tvOS variant from the fork with its exact attribute set.
-                    // Non-string JSON primitives (booleans/numbers) are stringified to their
-                    // literal form via JsonPrimitive.content, matching Gradle's own attribute
-                    // model where attribute values are always compared/stored as strings here.
-                    val attributes = attributesObject.mapValues { (_, value) -> value.jsonPrimitive.content }
-
-                    val moduleArtifactId = variantObject["available-at"]?.jsonObject
-                        ?.get("module")?.jsonPrimitive?.content
-                    val targetSuffix = nativeTarget.replace("_", "")
-                    val artifactId = moduleArtifactId
-                        ?: baseArtifactId?.let { "$it-$targetSuffix" }
-                        ?: targetSuffix
-
-                    variants.add(TvosVariant(variantName, nativeTarget, artifactId, attributes))
-                } catch (e: Exception) {
-                    logger?.info("[ComposeTvosRedirect] Skipping malformed variant entry: ${e.message}")
-                }
-            }
-
-            // Keep every (name, target) pair — api / sources / metadata / runtime all needed.
-            variants.distinctBy { it.variantName }
+    /**
+     * Public, always-succeeds entry point (never throws, degrades to `emptyList()`) — used
+     * directly by unit tests and by [parseModuleMetadataOutcome] below, which additionally
+     * distinguishes a genuine parse exception (returned as [FetchOutcome.Failure], so the
+     * caller in [discoverVariants] does not cache it) from a clean parse that simply found no
+     * (or zero tvOS) variants (returned as [FetchOutcome.Success], which IS cached — see Fix 2,
+     * task-10b-report.md).
+     */
+    internal fun parseModuleMetadata(moduleJson: String, logger: Logger? = null, baseArtifactId: String? = null): List<TvosVariant> =
+        try {
+            parseVariantsOrThrow(moduleJson, logger, baseArtifactId)
         } catch (e: Exception) {
             logger?.info("[ComposeTvosRedirect] Failed to parse module metadata: ${e.message}")
             emptyList()
         }
+
+    private fun parseModuleMetadataOutcome(moduleJson: String, logger: Logger?, baseArtifactId: String?): FetchOutcome =
+        try {
+            FetchOutcome.Success(parseVariantsOrThrow(moduleJson, logger, baseArtifactId))
+        } catch (e: Exception) {
+            logger?.info("[ComposeTvosRedirect] Failed to parse module metadata: ${e.message}")
+            FetchOutcome.Failure
+        }
+
+    /**
+     * Does the actual JSON-to-[TvosVariant] parsing, letting a genuine top-level parse failure
+     * (malformed JSON, or a `variants`/`attributes` shape that isn't the expected JSON type)
+     * propagate as an exception to the caller -- [parseModuleMetadata] and
+     * [parseModuleMetadataOutcome] each decide separately how to degrade that. A single
+     * malformed VARIANT entry inside an otherwise well-formed document is still handled here,
+     * per-entry, exactly as before: it is skipped rather than failing the whole document.
+     */
+    private fun parseVariantsOrThrow(moduleJson: String, logger: Logger?, baseArtifactId: String?): List<TvosVariant> {
+        val root = Json.parseToJsonElement(moduleJson).jsonObject
+        val variantsArray = root["variants"]?.jsonArray ?: return emptyList()
+
+        val variants = mutableListOf<TvosVariant>()
+        for (variantElement in variantsArray) {
+            // Each variant is parsed independently: a single malformed entry (e.g. a
+            // non-object array element, or an attribute value that isn't a JSON primitive)
+            // must only drop that variant, not the whole document — mirroring the
+            // per-section degradation the old regex-based parser had.
+            try {
+                val variantObject = variantElement.jsonObject
+                val attributesObject = variantObject["attributes"]?.jsonObject ?: continue
+
+                val nativeTarget = attributesObject["org.jetbrains.kotlin.native.target"]
+                    ?.jsonPrimitive?.content
+                    ?: continue
+                if (!nativeTarget.startsWith("tvos_")) continue
+
+                val variantName = variantObject["name"]?.jsonPrimitive?.content ?: continue
+
+                // Capture the full attribute map for this variant. The earlier "Api-only"
+                // filter and distinctBy(nativeTarget) produced a single injected variant with
+                // four attributes, which covered kotlin-api requests but silently failed for
+                // consumers whose source-set resolution needed kotlin-metadata / kotlin-runtime
+                // / sources variants (e.g. `appleMain` compileMainKotlinMetadata).
+                // We now mirror every tvOS variant from the fork with its exact attribute set.
+                // Non-string JSON primitives (booleans/numbers) are stringified to their
+                // literal form via JsonPrimitive.content, matching Gradle's own attribute
+                // model where attribute values are always compared/stored as strings here.
+                val attributes = attributesObject.mapValues { (_, value) -> value.jsonPrimitive.content }
+
+                val moduleArtifactId = variantObject["available-at"]?.jsonObject
+                    ?.get("module")?.jsonPrimitive?.content
+                val targetSuffix = nativeTarget.replace("_", "")
+                val artifactId = moduleArtifactId
+                    ?: baseArtifactId?.let { "$it-$targetSuffix" }
+                    ?: targetSuffix
+
+                variants.add(TvosVariant(variantName, nativeTarget, artifactId, attributes))
+            } catch (e: Exception) {
+                logger?.info("[ComposeTvosRedirect] Skipping malformed variant entry: ${e.message}")
+            }
+        }
+
+        // Keep every (name, target) pair — api / sources / metadata / runtime all needed.
+        return variants.distinctBy { it.variantName }
     }
 
     // Cache format (v3): the on-disk cache is a JSON array of TvosVariant, written via
@@ -258,7 +309,13 @@ object TvosVariantDiscovery {
         if (!cacheFile.exists()) return null
 
         return try {
-            json.decodeFromString<List<TvosVariant>>(cacheFile.readText()).takeIf { it.isNotEmpty() }
+            // Fix 2 (task-10b-report.md review): an existing file that decodes to an EMPTY list
+            // is a valid, successfully-cached "officially has no tvOS variants" result, not a
+            // miss -- only a decode exception (corrupt/unreadable file) falls through to `null`
+            // (a miss, triggering re-fetch). The previous `takeIf { it.isNotEmpty() }` guard
+            // treated a legitimately-cached empty result the same as a corrupt file, defeating
+            // the whole point of caching the (majority) empty-official-artifact case.
+            json.decodeFromString<List<TvosVariant>>(cacheFile.readText())
         } catch (e: Exception) {
             null
         }
@@ -293,6 +350,26 @@ object TvosVariantDiscovery {
      */
     fun alreadySupportedNativeTargets(variants: List<TvosVariant>): Set<String> =
         variants.map { it.nativeTarget }.toSet()
+
+    /**
+     * Task 10b follow-up (§5 second-defect, review of task-10b-report.md): true if [variants]
+     * (assumed already tvOS-filtered, discovered against the OFFICIAL `group:baseModule:version`
+     * coordinate) already ships a native variant for the exact tvOS platform-module suffix
+     * [tvosSuffix] names (e.g. `-tvosarm64`, as returned by [TvosTargets.extractTvosSuffix]).
+     * Comparison mirrors [parseVariantsOrThrow]'s own `nativeTarget.replace("_", "")` module-name
+     * derivation (`tvos_arm64` -> `tvosarm64`), case-insensitively, so it stays symmetric with
+     * how a real platform-module suffix is derived from a native target elsewhere in this file.
+     *
+     * Used by [dev.sajidali.compose.tvos.ComposeTvosRedirectPlugin]'s project-level dependency
+     * substitution to skip substituting a tvOS-suffixed coordinate to the fork when the official
+     * umbrella already provides that exact native target itself -- the same official-first
+     * pre-check [TvosVariantInjectionRule] performs before injecting (Task 10b), applied to the
+     * separate `dependencySubstitution.all` mechanism that has its own, independent blind spot.
+     */
+    fun isNativeTargetOfficiallySupported(variants: List<TvosVariant>, tvosSuffix: String): Boolean {
+        val normalizedSuffix = tvosSuffix.removePrefix("-").lowercase()
+        return alreadySupportedNativeTargets(variants).any { it.replace("_", "").lowercase() == normalizedSuffix }
+    }
 }
 
 /**

@@ -160,7 +160,9 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
                 additionalArtifacts = extension.additionalArtifacts.get(),
                 versionMappings = extension.versionMappings.get(),
                 manifestMappings = manifestMappings,
-                repositoryUrls = repositoryUrls
+                repositoryUrls = repositoryUrls,
+                cacheDirPath = cacheRoot.absolutePath,
+                offline = offline
             )
 
             evaluatedSettings.gradle.beforeProject { project ->
@@ -295,5 +297,11 @@ data class PluginConfiguration(
     val additionalArtifacts: Map<String, String>,
     val versionMappings: Map<String, String>,
     val manifestMappings: Map<String, String>,
-    val repositoryUrls: List<String>
+    val repositoryUrls: List<String>,
+    // Task 10b follow-up (Fix 1, review of task-10b-report.md): threaded through so
+    // ComposeTvosRedirectPlugin's project-level dependency substitution can run the same
+    // official-first pre-check TvosVariantInjectionRule already performs -- see
+    // ComposeTvosRedirectPlugin.isOfficiallySupported.
+    val cacheDirPath: String,
+    val offline: Boolean
 ) : java.io.Serializable

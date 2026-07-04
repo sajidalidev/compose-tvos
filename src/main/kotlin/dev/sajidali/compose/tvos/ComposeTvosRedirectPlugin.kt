@@ -3,6 +3,8 @@ package dev.sajidali.compose.tvos
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.artifacts.component.ModuleComponentSelector
+import org.gradle.api.logging.Logger
+import java.io.File
 
 /**
  * Project plugin that handles dependency substitution for tvOS artifacts.
@@ -132,6 +134,15 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
                     // Check artifact-level mapping first
                     val artifactMapping = artifactMappings[artifactKey]
                     if (artifactMapping != null && TvosArtifactMapping.isTvosArtifact(moduleName)) {
+                        if (isOfficiallySupported(groupId, moduleName, originalVersion, config, logger)) {
+                            if (verbose) {
+                                logger.lifecycle(
+                                    "[ComposeTvosRedirect] Skipping substitution: $groupId:$moduleName:$originalVersion " +
+                                        "is already officially supported by the requested artifact"
+                                )
+                            }
+                            return@all
+                        }
                         val (targetGroup, targetArtifact) = artifactMapping
                         val targetVersion = ComposeVersions.resolveVersion(
                             groupId, moduleName, originalVersion, allVersionMappings, config.targetVersion
@@ -152,6 +163,15 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
                     val isAdditionalGroup = config.additionalGroups.containsKey(groupId)
 
                     if ((isComposeGroup || isAdditionalGroup) && TvosArtifactMapping.isTvosArtifact(moduleName)) {
+                        if (isOfficiallySupported(groupId, moduleName, originalVersion, config, logger)) {
+                            if (verbose) {
+                                logger.lifecycle(
+                                    "[ComposeTvosRedirect] Skipping substitution: $groupId:$moduleName:$originalVersion " +
+                                        "is already officially supported by the requested artifact"
+                                )
+                            }
+                            return@all
+                        }
                         val targetGroup = allGroupMappings[groupId] ?: TvosArtifactMapping.mapGroupId(groupId)
                         val targetVersion = ComposeVersions.resolveVersion(
                             groupId, moduleName, originalVersion, allVersionMappings, config.targetVersion
@@ -170,6 +190,50 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
         if (verbose) {
             logger.lifecycle("[ComposeTvosRedirect] Dependency substitution configured")
         }
+    }
+
+    /**
+     * Task 10b follow-up (Fix 1, review of task-10b-report.md §5): before substituting a
+     * tvOS-suffixed coordinate to the fork, checks whether the OFFICIAL umbrella module (this
+     * request's own `group:baseModule:version`, recovering the base module name via
+     * [TvosTargets.extractTvosSuffix] -- NOT the redirect target) already publishes a native
+     * variant for the exact tvOS suffix being requested (e.g. `runtime-tvosarm64` -> `runtime`
+     * @ `tvos_arm64`).
+     *
+     * This mirrors the official-first pre-check [TvosVariantInjectionRule] already performs
+     * before injecting (Task 10b) -- without it, the umbrella correctly resolves its own
+     * official `available-at` edge to e.g. `runtime-tvosarm64`, but THIS mechanism (a separate,
+     * project-level `dependencySubstitution.all`, with no visibility into which tvOS-suffixed
+     * artifacts are genuinely official vs. fork-only) unconditionally hijacks that exact edge
+     * back to `dev.sajidali` anyway, silently serving the fork instead of the artifact Gradle
+     * had already correctly resolved.
+     *
+     * HOT-PATH note: `dependencySubstitution.all` fires per dependency edge per configuration.
+     * [TvosVariantDiscovery.discoverVariants] already memoizes by `group:artifact:version` in
+     * its own companion-object `ConcurrentHashMap` (memory) plus a disk cache -- shared, daemon-
+     * lifetime caches used by every caller, [TvosVariantInjectionRule] included -- so after the
+     * first lookup for a given official coordinate, every subsequent call here is a map hit, not
+     * a re-fetch; no additional caching layer is added in this class.
+     */
+    private fun isOfficiallySupported(
+        groupId: String,
+        moduleName: String,
+        version: String,
+        config: PluginConfiguration,
+        logger: Logger
+    ): Boolean {
+        val suffix = TvosTargets.extractTvosSuffix(moduleName) ?: return false
+        val baseModuleName = moduleName.removeSuffix(suffix)
+        val officialVariants = TvosVariantDiscovery.discoverVariants(
+            repositoryUrls = config.repositoryUrls,
+            groupId = groupId,
+            artifactId = baseModuleName,
+            version = version,
+            cacheDir = File(config.cacheDirPath),
+            logger = if (config.verbose) logger else null,
+            offline = config.offline
+        )
+        return TvosVariantDiscovery.isNativeTargetOfficiallySupported(officialVariants, suffix)
     }
 
     companion object {

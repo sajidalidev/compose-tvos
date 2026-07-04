@@ -153,9 +153,14 @@ abstract class TvosVariantInjectionRule @Inject constructor(
                 SkippedAlreadySupportedRecord(sourceModule, targetCoordinate, skippedTargets)
             )
             if (params.verbose) {
+                // Fix 4 (review of task-10b-report.md): skippedTargets carries one entry per
+                // skipped VARIANT (api/metadata/sources all share the same nativeTarget), so the
+                // raw list logs the same target repeated 2-3x (e.g. "[tvos_arm64, tvos_arm64,
+                // tvos_arm64]"). The count in the message still reflects the true variant count;
+                // only the displayed list of targets is deduped for readability.
                 logger.lifecycle(
                     "[ComposeTvosRedirect] Skipping ${skippedTargets.size} tvOS variant(s) already " +
-                        "supported by the official artifact: $group:$moduleName:${id.version} ($skippedTargets)"
+                        "supported by the official artifact: $group:$moduleName:${id.version} (${skippedTargets.distinct()})"
                 )
             }
         }

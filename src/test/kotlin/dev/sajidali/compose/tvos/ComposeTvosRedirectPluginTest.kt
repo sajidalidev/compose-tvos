@@ -475,6 +475,161 @@ class TvosVariantDiscoveryDiskCacheTest {
         assertEquals("native", roundTripped.attributes["org.jetbrains.kotlin.platform.type"])
         assertEquals("tvos_arm64", roundTripped.attributes["org.jetbrains.kotlin.native.target"])
     }
+
+    // -- Task 10b follow-up (Fix 2, review of task-10b-report.md): successful-but-empty
+    // discovery results must be cached (memory + disk), while a genuine fetch FAILURE must
+    // never be, so it stays retryable. --------------------------------------------------------
+
+    @Test
+    fun `a successful fetch that finds zero tvOS variants is cached and not re-fetched`(@TempDir tempDir: File) {
+        TvosVariantDiscovery.clearCache()
+
+        val groupId = "dev.sajidali.compose.emptyfetchtest"
+        val artifactId = "emptyfetchtest"
+        val version = "1.0.0-empty-fetch-test"
+
+        val repoDir = File(tempDir, "repo")
+        val moduleFile = File(
+            repoDir,
+            "dev/sajidali/compose/emptyfetchtest/emptyfetchtest/$version/emptyfetchtest-$version.module"
+        )
+        moduleFile.parentFile.mkdirs()
+        // Well-formed module metadata with NO tvOS variants at all (e.g. an android-only
+        // umbrella) -- a genuinely successful fetch+parse that legitimately finds zero tvOS
+        // variants, the majority-case shape this fix targets.
+        moduleFile.writeText(
+            """
+            {
+              "variants": [
+                { "name": "androidApiElements", "attributes": { "org.jetbrains.kotlin.native.target": "android_arm64" } }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        val cacheDir = File(tempDir, "cache")
+        val variants = TvosVariantDiscovery.discoverVariants(
+            repositoryUrls = listOf(repoDir.toURI().toString()),
+            groupId = groupId,
+            artifactId = artifactId,
+            version = version,
+            cacheDir = cacheDir
+        )
+        assertTrue(variants.isEmpty())
+
+        val cacheKey = "$groupId:$artifactId:$version"
+        val safeKey = cacheKey.replace(":", "_").replace(".", "_")
+        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.cache")
+        assertTrue(cacheFile.exists(), "a successful empty-variant fetch must still write the disk cache")
+
+        // Force the disk-read path (clear the in-memory cache) and remove the repository
+        // entirely, so a re-fetch attempt would fail loudly rather than silently succeeding.
+        TvosVariantDiscovery.clearCache()
+        repoDir.deleteRecursively()
+        val cached = TvosVariantDiscovery.discoverVariants(
+            repositoryUrls = listOf(repoDir.toURI().toString()),
+            groupId = groupId,
+            artifactId = artifactId,
+            version = version,
+            cacheDir = cacheDir
+        )
+        assertTrue(cached.isEmpty(), "the cached empty result must be served without needing the (now-deleted) repository")
+    }
+
+    @Test
+    fun `an existing empty-list disk cache file is served as a valid hit, not a miss`(@TempDir tempDir: File) {
+        TvosVariantDiscovery.clearCache()
+
+        val groupId = "dev.sajidali.compose.emptycachetest"
+        val artifactId = "emptycachetest"
+        val version = "1.0.0-empty-cache-hit-test"
+
+        val cacheDir = File(tempDir, "cache")
+        val cacheKey = "$groupId:$artifactId:$version"
+        val safeKey = cacheKey.replace(":", "_").replace(".", "_")
+        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.cache")
+        cacheFile.parentFile.mkdirs()
+        cacheFile.writeText("[]")
+
+        val hits = AtomicInteger()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            hits.incrementAndGet()
+            exchange.sendResponseHeaders(404, -1)
+            exchange.close()
+        }
+        server.start()
+        try {
+            val variants = TvosVariantDiscovery.discoverVariants(
+                repositoryUrls = listOf("http://127.0.0.1:${server.address.port}"),
+                groupId = groupId,
+                artifactId = artifactId,
+                version = version,
+                cacheDir = cacheDir
+            )
+
+            assertTrue(variants.isEmpty())
+            assertEquals(0, hits.get(), "an existing empty-list cache file must be served without any network fetch")
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `a fetch failure across all repositories is not cached and remains retryable`(@TempDir tempDir: File) {
+        TvosVariantDiscovery.clearCache()
+
+        val groupId = "dev.sajidali.compose.failtest"
+        val artifactId = "failtest"
+        val version = "1.0.0-fetch-failure-test"
+        val missingRepoDir = File(tempDir, "missing-repo") // never created -> the .module file is missing -> failure
+        val cacheDir = File(tempDir, "cache")
+
+        val first = TvosVariantDiscovery.discoverVariants(
+            repositoryUrls = listOf(missingRepoDir.toURI().toString()),
+            groupId = groupId,
+            artifactId = artifactId,
+            version = version,
+            cacheDir = cacheDir
+        )
+        assertTrue(first.isEmpty())
+
+        val cacheKey = "$groupId:$artifactId:$version"
+        val safeKey = cacheKey.replace(":", "_").replace(".", "_")
+        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.cache")
+        assertFalse(cacheFile.exists(), "a fetch failure must never populate the disk cache")
+
+        // Publish the module and retry: a stale, wrongly-cached empty result would have
+        // short-circuited this retry and returned empty again.
+        TvosVariantDiscovery.clearCache()
+        val moduleFile = File(
+            missingRepoDir,
+            "dev/sajidali/compose/failtest/failtest/$version/failtest-$version.module"
+        )
+        moduleFile.parentFile.mkdirs()
+        moduleFile.writeText(
+            """
+            {
+              "variants": [
+                {
+                  "name": "tvosArm64ApiElements",
+                  "attributes": { "org.jetbrains.kotlin.native.target": "tvos_arm64" },
+                  "available-at": { "module": "failtest-tvosarm64" }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        val retried = TvosVariantDiscovery.discoverVariants(
+            repositoryUrls = listOf(missingRepoDir.toURI().toString()),
+            groupId = groupId,
+            artifactId = artifactId,
+            version = version,
+            cacheDir = cacheDir
+        )
+        assertEquals(1, retried.size, "a retry after a previous fetch failure must still succeed (no stale cached-empty result)")
+    }
 }
 
 /**
