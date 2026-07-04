@@ -258,6 +258,49 @@ class TvosVariantDiscoveryTest {
         assertTrue(TvosVariantDiscovery.parseModuleMetadata("{ this is not valid json").isEmpty())
         assertTrue(TvosVariantDiscovery.parseModuleMetadata("").isEmpty())
     }
+
+    @Test
+    fun `parseModuleMetadata skips a malformed variant and keeps well-formed siblings`() {
+        // A single variant whose attributes map contains a non-primitive value (nested
+        // object instead of a string/number/boolean) must not take down the whole document —
+        // only that variant should be dropped; the two well-formed tvOS variants around it
+        // must still come back.
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64ApiElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_arm64"
+              },
+              "available-at": { "module": "ui-tvosarm64" }
+            },
+            {
+              "name": "tvosSimulatorArm64ApiElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_simulator_arm64",
+                "custom.broken": { "unexpected": "nested-object" }
+              },
+              "available-at": { "module": "ui-tvossimulatorarm64" }
+            },
+            {
+              "name": "tvosX64ApiElements",
+              "attributes": {
+                "org.jetbrains.kotlin.native.target": "tvos_x64"
+              },
+              "available-at": { "module": "ui-tvosx64" }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "ui")
+
+        assertEquals(2, variants.size)
+        assertTrue(variants.any { it.nativeTarget == "tvos_arm64" })
+        assertTrue(variants.any { it.nativeTarget == "tvos_x64" })
+        assertFalse(variants.any { it.nativeTarget == "tvos_simulator_arm64" })
+    }
 }
 
 class TvosVariantDiscoveryDiskCacheTest {
@@ -322,6 +365,80 @@ class TvosVariantDiscoveryDiskCacheTest {
             cacheDir = cacheDir
         )
         assertEquals(1, cached.size, "valid cache written after refetch must be re-readable")
+    }
+
+    @Test
+    fun `disk cache round-trip preserves the full multi-key attributes map`(@TempDir tempDir: File) {
+        TvosVariantDiscovery.clearCache()
+
+        val groupId = "dev.sajidali.compose.attrscachetest"
+        val artifactId = "attrscachetest"
+        val version = "1.0.0-attrs-cache-test"
+
+        val moduleJsonWithAttrs = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64ApiElements",
+              "attributes": {
+                "org.gradle.category": "library",
+                "org.gradle.usage": "kotlin-api",
+                "org.gradle.jvm.environment": "non-jvm",
+                "org.jetbrains.kotlin.platform.type": "native",
+                "org.jetbrains.kotlin.native.target": "tvos_arm64"
+              },
+              "available-at": { "module": "attrscachetest-tvosarm64" }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val repoDir = File(tempDir, "repo")
+        val moduleFile = File(
+            repoDir,
+            "dev/sajidali/compose/attrscachetest/attrscachetest/$version/attrscachetest-$version.module"
+        )
+        moduleFile.parentFile.mkdirs()
+        moduleFile.writeText(moduleJsonWithAttrs)
+
+        val cacheDir = File(tempDir, "cache")
+
+        // Fetch from the fixture repo — this also write-throughs the parsed variants to disk.
+        val fetched = TvosVariantDiscovery.discoverVariants(
+            repositoryUrls = listOf(repoDir.toURI().toString()),
+            groupId = groupId,
+            artifactId = artifactId,
+            version = version,
+            cacheDir = cacheDir
+        )
+        assertEquals(1, fetched.size)
+
+        // Force the disk-read path: clear the in-memory cache and supply no repository URLs,
+        // so discoverVariants can only succeed by reading back what was written to disk above.
+        TvosVariantDiscovery.clearCache()
+        val cached = TvosVariantDiscovery.discoverVariants(
+            repositoryUrls = emptyList(),
+            groupId = groupId,
+            artifactId = artifactId,
+            version = version,
+            cacheDir = cacheDir
+        )
+
+        assertEquals(1, cached.size, "variant written to disk must be re-readable")
+        val original = fetched[0]
+        val roundTripped = cached[0]
+
+        assertEquals(original.variantName, roundTripped.variantName)
+        assertEquals(original.nativeTarget, roundTripped.nativeTarget)
+        assertEquals(original.artifactId, roundTripped.artifactId)
+        assertEquals(original.attributes, roundTripped.attributes)
+
+        assertEquals(5, roundTripped.attributes.size)
+        assertEquals("library", roundTripped.attributes["org.gradle.category"])
+        assertEquals("kotlin-api", roundTripped.attributes["org.gradle.usage"])
+        assertEquals("non-jvm", roundTripped.attributes["org.gradle.jvm.environment"])
+        assertEquals("native", roundTripped.attributes["org.jetbrains.kotlin.platform.type"])
+        assertEquals("tvos_arm64", roundTripped.attributes["org.jetbrains.kotlin.native.target"])
     }
 }
 

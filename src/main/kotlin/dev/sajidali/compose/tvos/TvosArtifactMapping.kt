@@ -152,35 +152,43 @@ object TvosVariantDiscovery {
 
             val variants = mutableListOf<TvosVariant>()
             for (variantElement in variantsArray) {
-                val variantObject = variantElement.jsonObject
-                val attributesObject = variantObject["attributes"]?.jsonObject ?: continue
+                // Each variant is parsed independently: a single malformed entry (e.g. a
+                // non-object array element, or an attribute value that isn't a JSON primitive)
+                // must only drop that variant, not the whole document — mirroring the
+                // per-section degradation the old regex-based parser had.
+                try {
+                    val variantObject = variantElement.jsonObject
+                    val attributesObject = variantObject["attributes"]?.jsonObject ?: continue
 
-                val nativeTarget = attributesObject["org.jetbrains.kotlin.native.target"]
-                    ?.jsonPrimitive?.content
-                    ?: continue
-                if (!nativeTarget.startsWith("tvos_")) continue
+                    val nativeTarget = attributesObject["org.jetbrains.kotlin.native.target"]
+                        ?.jsonPrimitive?.content
+                        ?: continue
+                    if (!nativeTarget.startsWith("tvos_")) continue
 
-                val variantName = variantObject["name"]?.jsonPrimitive?.content ?: continue
+                    val variantName = variantObject["name"]?.jsonPrimitive?.content ?: continue
 
-                // Capture the full attribute map for this variant. The earlier "Api-only"
-                // filter and distinctBy(nativeTarget) produced a single injected variant with
-                // four attributes, which covered kotlin-api requests but silently failed for
-                // consumers whose source-set resolution needed kotlin-metadata / kotlin-runtime
-                // / sources variants (e.g. `appleMain` compileMainKotlinMetadata).
-                // We now mirror every tvOS variant from the fork with its exact attribute set.
-                // Non-string JSON primitives (booleans/numbers) are stringified to their
-                // literal form via JsonPrimitive.content, matching Gradle's own attribute
-                // model where attribute values are always compared/stored as strings here.
-                val attributes = attributesObject.mapValues { (_, value) -> value.jsonPrimitive.content }
+                    // Capture the full attribute map for this variant. The earlier "Api-only"
+                    // filter and distinctBy(nativeTarget) produced a single injected variant with
+                    // four attributes, which covered kotlin-api requests but silently failed for
+                    // consumers whose source-set resolution needed kotlin-metadata / kotlin-runtime
+                    // / sources variants (e.g. `appleMain` compileMainKotlinMetadata).
+                    // We now mirror every tvOS variant from the fork with its exact attribute set.
+                    // Non-string JSON primitives (booleans/numbers) are stringified to their
+                    // literal form via JsonPrimitive.content, matching Gradle's own attribute
+                    // model where attribute values are always compared/stored as strings here.
+                    val attributes = attributesObject.mapValues { (_, value) -> value.jsonPrimitive.content }
 
-                val moduleArtifactId = variantObject["available-at"]?.jsonObject
-                    ?.get("module")?.jsonPrimitive?.content
-                val targetSuffix = nativeTarget.replace("_", "")
-                val artifactId = moduleArtifactId
-                    ?: baseArtifactId?.let { "$it-$targetSuffix" }
-                    ?: targetSuffix
+                    val moduleArtifactId = variantObject["available-at"]?.jsonObject
+                        ?.get("module")?.jsonPrimitive?.content
+                    val targetSuffix = nativeTarget.replace("_", "")
+                    val artifactId = moduleArtifactId
+                        ?: baseArtifactId?.let { "$it-$targetSuffix" }
+                        ?: targetSuffix
 
-                variants.add(TvosVariant(variantName, nativeTarget, artifactId, attributes))
+                    variants.add(TvosVariant(variantName, nativeTarget, artifactId, attributes))
+                } catch (e: Exception) {
+                    logger?.info("[ComposeTvosRedirect] Skipping malformed variant entry: ${e.message}")
+                }
             }
 
             // Keep every (name, target) pair — api / sources / metadata / runtime all needed.
