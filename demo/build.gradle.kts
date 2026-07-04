@@ -86,12 +86,32 @@ compose.resources {
 //  1. Only the exact modules observed on BOTH sides of the duplicate (requested at 1.11.0 via
 //     material3's transitive graph AND at 1.12.0-beta01 via runtime/foundation's direct graph)
 //     are forced. org.jetbrains.compose.material3 itself is excluded (tracks its own alpha
-//     line, handled by versionMappings), and so are org.jetbrains.compose.collection-internal /
-//     annotation-internal / material (material-ripple) -- these are requested ONLY at 1.11.0
-//     nowhere else in the graph, have no dev.sajidali publish at 1.12.0-beta01 (confirmed 404
-//     on the live JetBrains dev repo too), and forcing them broke resolution outright.
+//     line, handled by versionMappings). org.jetbrains.compose.collection-internal /
+//     annotation-internal are excluded because dev.sajidali never republishes either at ANY
+//     version at all (verified: no dev/sajidali/compose/{collection,annotation}-internal
+//     directory exists in mavenLocal), and the official artifact already ships its own genuine
+//     tvosArm64/tvosSimulatorArm64 klibs locally, so forcing them would only break their
+//     already-working official-first resolution.
+//     org.jetbrains.compose.material:material-ripple is excluded for a DIFFERENT reason (task-
+//     10d correction -- the claim previously here, "no dev.sajidali publish at 1.12.0-beta01,
+//     confirmed 404 on the live JetBrains dev repo", was WRONG on both counts: dev.sajidali DOES
+//     publish material-ripple:1.12.0-beta01 -- present in mavenLocal -- and the OFFICIAL
+//     org.jetbrains.compose.material:material-ripple:1.12.0-beta01 coordinate genuinely exists
+//     on the live JetBrains dev repo too (confirmed directly via curl against its
+//     maven-metadata.xml and .module file), though that live artifact ships no tvOS variant at
+//     all. The real, verified reason material-ripple is excluded: unlike ui/foundation-layout/
+//     animation, it is requested ONLY via material3's transitive graph at 1.11.0, with no
+//     second, direct edge anywhere in this demo's graph requesting it at 1.12.0-beta01 -- so
+//     there is no actual duplicate-symbol collision here for forcing to fix. Re-verified
+//     directly (task-10d): temporarily adding "material-ripple" to this set and re-running
+//     gates (a)-(c) resolves and links cleanly with no duplicate-klib error, confirming forcing
+//     it would be harmless but pointless (not resolution-breaking, as previously claimed) --
+//     left out simply because there is nothing here for it to fix.
 //  2. Only configurations whose name contains "tvos" are touched, so iosArm64 (gate (d)'s
 //     "zero dev.sajidali, untouched" control target) never sees this override at all.
+//
+// TEMPORARY dev-machine-pollution guard -- remove once Phase 5's clean-machine verification
+// passes without it (no-op on clean mavenLocal by design).
 val duplicateKlibRiskModules = setOf(
     "ui", "ui-uikit", "ui-backhandler", "ui-text", "ui-util", "ui-graphics", "ui-unit", "ui-geometry",
     "animation", "animation-core", "foundation-layout"
