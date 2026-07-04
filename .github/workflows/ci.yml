@@ -34,7 +34,13 @@ jobs:
       - name: Read functional-test Kotlin version
         id: kgp
         run: |
-          version=$(grep -oE 'KOTLIN_VERSION = "[^"]+"' src/test/kotlin/dev/sajidali/compose/tvos/FunctionalTest.kt | cut -d'"' -f2)
+          # The constant appears once per functional-test class; dedupe so $GITHUB_OUTPUT
+          # gets a single key=value line, and fail loudly if the classes ever disagree.
+          version=$(grep -oE 'KOTLIN_VERSION = "[^"]+"' src/test/kotlin/dev/sajidali/compose/tvos/FunctionalTest.kt | cut -d'"' -f2 | sort -u)
+          if [ "$(printf '%s\n' "$version" | wc -l)" -ne 1 ]; then
+            echo "Multiple distinct KOTLIN_VERSION values found in FunctionalTest.kt: $version" >&2
+            exit 1
+          fi
           if [ -z "$version" ]; then
             echo "Could not find KOTLIN_VERSION constant in FunctionalTest.kt" >&2
             exit 1
