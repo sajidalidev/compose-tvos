@@ -23,6 +23,16 @@ import java.util.concurrent.ConcurrentHashMap
  * `settingsEvaluated`), and `ConcurrentHashMap` because both the component-metadata rule and
  * the dependency-substitution callback fire concurrently across components/configurations
  * (and, for a multi-project build, potentially across projects).
+ *
+ * GUARD-RAIL: any NEW "official-first" success path added anywhere in this plugin (i.e. any
+ * mechanism that decides "the official artifact already covers this, no redirect/injection
+ * needed") MUST record that success here via [recordSkippedAlreadySupported] (or
+ * [recordEmptyForkDiscovery]), exactly as [ComposeTvosRedirectPlugin.isOfficiallySupported] and
+ * `TvosVariantInjectionRule` already do. Skipping this is how a mechanism's successes go
+ * invisible to `DiagnosticsSummary.filterConflictLosers` (Task 10d), which is the only thing
+ * suppressing spurious "empty discovery" WARNs for conflict-resolution losers -- an unrecorded
+ * success path silently reintroduces false-positive WARNs (or `strictMode` failures) for a
+ * perfectly healthy build.
  */
 internal object TvosDiagnosticsBookkeeping {
     private val injections = ConcurrentHashMap<String, InjectionRecord>()

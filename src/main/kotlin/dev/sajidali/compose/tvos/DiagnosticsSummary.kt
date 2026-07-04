@@ -60,7 +60,12 @@ internal object DiagnosticsSummary {
         // redirect/skip-substitution lines). `logger.info` would have silently required the
         // consumer to ALSO pass Gradle's own `--info`/`--debug` flag, which this plugin's
         // `verbose` flag was never meant to depend on.
-        if (verbose && filtered.suppressed.isNotEmpty()) {
+        //
+        // Task 10e (review fix): also gated on [tvosTargetsDetected], same as the WARN/strict
+        // path below -- this is tvOS-specific chatter (conflict losers among tvOS redirect
+        // candidates), so it must stay silent for a non-tvOS-target project even with
+        // `verbose=true`, matching this class's "zero noise for non-tvOS projects" invariant.
+        if (verbose && tvosTargetsDetected && filtered.suppressed.isNotEmpty()) {
             logger.lifecycle(suppressedLine(filtered.suppressed))
         }
 

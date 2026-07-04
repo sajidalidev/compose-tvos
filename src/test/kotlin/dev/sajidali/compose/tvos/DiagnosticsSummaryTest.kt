@@ -211,6 +211,41 @@ class DiagnosticsSummaryTest {
         assertEquals(emptyList(), logger.lifecycleMessages, "no injections happened and nothing was suppressed, so no lifecycle line at all is expected")
     }
 
+    // Review fix (post-10e): the suppressed-entries line must ALSO honor the tvOS-target guard,
+    // same as the WARN/strict path -- a non-tvOS-target project must see zero tvOS chatter even
+    // with verbose=true, per this class's own "zero noise for non-tvOS projects" invariant.
+
+    @Test
+    fun `verbose prints no suppressed-entries lifecycle line when tvosTargetsDetected is false`() {
+        val snapshot = DiagnosticsSnapshot(
+            injections = listOf(injection("g:ui:1.12.0-beta01")),
+            emptyDiscoveries = listOf(emptyDiscovery("g:ui:1.11.0-beta03"))
+        )
+        val logger = RecordingLogger()
+
+        DiagnosticsSummary.report(snapshot, tvosTargetsDetected = false, strictMode = false, verbose = true, logger = logger)
+
+        assertTrue(
+            logger.lifecycleMessages.none { it.contains("suppressed") },
+            "a non-tvOS-target project must see no suppressed-entries chatter even with verbose=true; got: ${logger.lifecycleMessages}"
+        )
+        assertEquals(emptyList(), logger.warnMessages)
+    }
+
+    @Test
+    fun `verbose still prints the suppressed-entries lifecycle line when tvosTargetsDetected is true`() {
+        val snapshot = DiagnosticsSnapshot(
+            injections = listOf(injection("g:ui:1.12.0-beta01")),
+            emptyDiscoveries = listOf(emptyDiscovery("g:ui:1.11.0-beta03"))
+        )
+        val logger = RecordingLogger()
+
+        DiagnosticsSummary.report(snapshot, tvosTargetsDetected = true, strictMode = false, verbose = true, logger = logger)
+
+        val suppressedMessages = logger.lifecycleMessages.filter { it.contains("suppressed") }
+        assertEquals(1, suppressedMessages.size, "expected exactly one suppressed-entries lifecycle line; got: ${logger.lifecycleMessages}")
+    }
+
     /** Captures warn/info/lifecycle calls for assertions; delegates everything else to a real (silent) Logger. */
     private class RecordingLogger : Logger by Logging.getLogger(RecordingLogger::class.java) {
         val warnMessages = mutableListOf<String>()

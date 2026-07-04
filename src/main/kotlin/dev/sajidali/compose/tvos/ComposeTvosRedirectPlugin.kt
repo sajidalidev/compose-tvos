@@ -226,6 +226,9 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
      * mechanisms' bookkeeping entries for the same coordinate line up under one key. Visibility
      * is `internal` (not `private`) so this can be exercised directly by a unit test without a
      * full GradleTestKit build (see `ComposeTvosRedirectPluginTest.kt`).
+     *
+     * This is the exemplar "official-first" success path referenced by [TvosDiagnosticsBookkeeping]'s
+     * class KDoc guard-rail -- any future one must record here too.
      */
     internal fun isOfficiallySupported(
         groupId: String,
