@@ -1,8 +1,11 @@
 package dev.sajidali.compose.tvos
 
+import com.sun.net.httpserver.HttpServer
 import org.gradle.testfixtures.ProjectBuilder
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.net.InetSocketAddress
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -439,6 +442,108 @@ class TvosVariantDiscoveryDiskCacheTest {
         assertEquals("non-jvm", roundTripped.attributes["org.gradle.jvm.environment"])
         assertEquals("native", roundTripped.attributes["org.jetbrains.kotlin.platform.type"])
         assertEquals("tvos_arm64", roundTripped.attributes["org.jetbrains.kotlin.native.target"])
+    }
+}
+
+/**
+ * Direct unit tests for [TvosVariantDiscovery.discoverVariants]'s `offline` guard: a local
+ * [HttpServer] stands in for a configured repository URL and counts requests, so these tests
+ * prove the network is never touched while offline — not merely that the correct value comes
+ * back. (See task-4-report.md, "Fix" section, for the mutation-check evidence that these
+ * assertions would fail if the `if (offline)` short-circuit were removed.)
+ */
+class TvosVariantDiscoveryOfflineTest {
+
+    private fun countingServer(): Pair<HttpServer, AtomicInteger> {
+        val hits = AtomicInteger()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            hits.incrementAndGet()
+            exchange.sendResponseHeaders(404, -1)
+            exchange.close()
+        }
+        server.start()
+        return server to hits
+    }
+
+    @Test
+    fun `offline discovery with empty memory cache and no disk cache never contacts the repository`(@TempDir tempDir: File) {
+        TvosVariantDiscovery.clearCache()
+        val (server, hits) = countingServer()
+        try {
+            val variants = TvosVariantDiscovery.discoverVariants(
+                repositoryUrls = listOf("http://127.0.0.1:${server.address.port}"),
+                groupId = "dev.sajidali.compose.offlinetest",
+                artifactId = "offlinetest",
+                version = "1.0.0-offline-nocache-test",
+                cacheDir = File(tempDir, "cache"),
+                offline = true
+            )
+
+            assertTrue(variants.isEmpty(), "offline discovery with nothing cached must return empty")
+            assertEquals(0, hits.get(), "offline discovery must never open a network connection")
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `offline discovery for a SNAPSHOT version never contacts the repository`(@TempDir tempDir: File) {
+        // SNAPSHOT versions are deliberately never written to the disk cache (see
+        // discoverVariants), so this is the purest form of "nothing cached" — offline must
+        // still short-circuit before the SNAPSHOT-specific disk-cache skip is even reached.
+        TvosVariantDiscovery.clearCache()
+        val (server, hits) = countingServer()
+        try {
+            val variants = TvosVariantDiscovery.discoverVariants(
+                repositoryUrls = listOf("http://127.0.0.1:${server.address.port}"),
+                groupId = "dev.sajidali.compose.offlinetest",
+                artifactId = "offlinetest",
+                version = "1.0.0-SNAPSHOT",
+                cacheDir = File(tempDir, "cache"),
+                offline = true
+            )
+
+            assertTrue(variants.isEmpty(), "offline discovery of an uncached SNAPSHOT must return empty")
+            assertEquals(0, hits.get(), "offline discovery must never open a network connection for a SNAPSHOT version")
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `offline discovery serves a valid disk cache without contacting the repository`(@TempDir tempDir: File) {
+        TvosVariantDiscovery.clearCache()
+
+        val groupId = "dev.sajidali.compose.offlinedisktest"
+        val artifactId = "offlinedisktest"
+        val version = "1.0.0-offline-disk-cache-test"
+        val cacheDir = File(tempDir, "cache")
+        val cacheKey = "$groupId:$artifactId:$version"
+        val safeKey = cacheKey.replace(":", "_").replace(".", "_")
+        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.cache")
+        cacheFile.parentFile.mkdirs()
+        cacheFile.writeText(
+            """[{"variantName":"tvosArm64ApiElements","nativeTarget":"tvos_arm64","artifactId":"offlinedisktest-tvosarm64","attributes":{}}]"""
+        )
+
+        val (server, hits) = countingServer()
+        try {
+            val variants = TvosVariantDiscovery.discoverVariants(
+                repositoryUrls = listOf("http://127.0.0.1:${server.address.port}"),
+                groupId = groupId,
+                artifactId = artifactId,
+                version = version,
+                cacheDir = cacheDir,
+                offline = true
+            )
+
+            assertEquals(1, variants.size, "offline discovery must serve the on-disk cache when present")
+            assertEquals("tvos_arm64", variants[0].nativeTarget)
+            assertEquals(0, hits.get(), "offline discovery must not contact the repository even with a disk cache present")
+        } finally {
+            server.stop(0)
+        }
     }
 }
 

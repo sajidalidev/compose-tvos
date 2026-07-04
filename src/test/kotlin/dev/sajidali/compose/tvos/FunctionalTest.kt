@@ -617,6 +617,51 @@ class VersionManifestLoaderHttpTest {
         assertTrue(mappings.isEmpty(), "no cache + no network must degrade to an empty map")
     }
 
+    @Test
+    fun `offline with a fresh cache returns cached mappings without a network request`(@TempDir cacheDir: File) {
+        withManifestServer(manifestBody) { url, hits ->
+            VersionManifestLoader.load(url, cacheDir, refreshDependencies = false)
+            val hitsAfterWarm = hits.get()
+
+            val mappings = VersionManifestLoader.load(url, cacheDir, refreshDependencies = false, offline = true)
+
+            assertEquals(expectedMappings, mappings, "offline load must serve the fresh disk cache")
+            assertEquals(hitsAfterWarm, hits.get(), "offline load must not perform a network request")
+        }
+    }
+
+    @Test
+    fun `offline with a stale cache still serves the stale mappings without a network request`(@TempDir cacheDir: File) {
+        withManifestServer(manifestBody) { url, hits ->
+            VersionManifestLoader.load(url, cacheDir, refreshDependencies = false)
+            val cacheFile = manifestCacheFiles(cacheDir).single()
+            val twentyFiveHoursAgo = System.currentTimeMillis() - 25L * 60 * 60 * 1000
+            assertTrue(cacheFile.setLastModified(twentyFiveHoursAgo), "failed to age cache file")
+
+            val hitsBeforeOffline = hits.get()
+            val mappings = VersionManifestLoader.load(url, cacheDir, refreshDependencies = false, offline = true)
+
+            assertEquals(
+                expectedMappings, mappings,
+                "offline load must serve whatever cache exists, stale or not -- offline never fetches"
+            )
+            assertEquals(
+                hitsBeforeOffline, hits.get(),
+                "offline load must not perform a network request even with a stale cache"
+            )
+        }
+    }
+
+    @Test
+    fun `offline with no cache degrades to empty mappings without a network request`(@TempDir cacheDir: File) {
+        withManifestServer(manifestBody) { url, hits ->
+            val mappings = VersionManifestLoader.load(url, cacheDir, refreshDependencies = false, offline = true)
+
+            assertTrue(mappings.isEmpty(), "no cache + offline must degrade to the same-version convention (empty mappings)")
+            assertEquals(0, hits.get(), "offline load must never contact the server")
+        }
+    }
+
     private fun manifestCacheFiles(cacheDir: File): List<File> =
         cacheDir.resolve("compose-tvos-redirect-cache-v3/version-manifest")
             .listFiles()?.toList().orEmpty()

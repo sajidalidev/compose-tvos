@@ -59,6 +59,16 @@ object TvosVariantDiscovery {
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
+     * Fetching here is done via plain `HttpURLConnection`/`File` reads rather than Gradle's
+     * injected `RepositoryResourceAccessor`. `RepositoryResourceAccessor` binds resource
+     * fetching to the single repository that declared the component-metadata rule requesting
+     * it, which fits same-repo lookups (e.g. fetching a sibling POM from the repo that's
+     * already resolving the component). Here the rule fires on `org.jetbrains` components but
+     * must probe a configurable list of *independent* repository URLs for the unrelated
+     * `dev.sajidali` TARGET coordinate's module metadata — a cross-repository, multi-URL
+     * search `RepositoryResourceAccessor` isn't built for — so a direct, offline-aware,
+     * redirect-bounded `HttpURLConnection`/file path is used instead.
+     *
      * @param offline When true, only the in-memory/disk caches are consulted — no network
      * connection is ever opened. A SNAPSHOT version (which never populates the disk cache,
      * see below) with no in-memory entry therefore resolves to an empty list while offline,
