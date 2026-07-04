@@ -53,8 +53,15 @@ internal object DiagnosticsSummary {
 
         val filtered = filterConflictLosers(snapshot)
 
+        // Task 10e (fix of a 10d concern): this must fire at Gradle's `lifecycle` level, not
+        // `info`, so it is visible to a consumer who only set `composeTvos.verbose=true` --
+        // matching the level every OTHER verbose-only message in this plugin already uses
+        // (TvosVariantInjectionRule's injection/skip lines, ComposeTvosRedirectPlugin's
+        // redirect/skip-substitution lines). `logger.info` would have silently required the
+        // consumer to ALSO pass Gradle's own `--info`/`--debug` flag, which this plugin's
+        // `verbose` flag was never meant to depend on.
         if (verbose && filtered.suppressed.isNotEmpty()) {
-            logger.info(suppressedLine(filtered.suppressed))
+            logger.lifecycle(suppressedLine(filtered.suppressed))
         }
 
         if (filtered.kept.isEmpty() || !tvosTargetsDetected) return

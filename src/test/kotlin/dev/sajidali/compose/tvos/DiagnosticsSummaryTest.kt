@@ -156,10 +156,15 @@ class DiagnosticsSummaryTest {
         assertTrue(!logger.warnMessages.single().contains("g:ui:1.11.0-beta03"))
     }
 
-    // -- report(): verbose-only suppressed-entries info line -----------------------------
+    // -- report(): verbose-only suppressed-entries lifecycle line ------------------------
+    //
+    // Task 10e (fix of a 10d concern): the suppressed-entries line must fire at Gradle's
+    // `lifecycle` level (matching every other verbose-only message in this plugin), not
+    // `info` -- so it is visible to a consumer who only set `composeTvos.verbose=true`,
+    // without ALSO needing Gradle's own `--info`/`--debug` flag.
 
     @Test
-    fun `verbose prints an info line naming the suppressed entries when losers were suppressed`() {
+    fun `verbose prints a lifecycle line naming the suppressed entries when losers were suppressed`() {
         val snapshot = DiagnosticsSnapshot(
             injections = listOf(injection("g:ui:1.12.0-beta01")),
             emptyDiscoveries = listOf(emptyDiscovery("g:ui:1.11.0-beta03"))
@@ -168,8 +173,10 @@ class DiagnosticsSummaryTest {
 
         DiagnosticsSummary.report(snapshot, tvosTargetsDetected = true, strictMode = false, verbose = true, logger = logger)
 
-        assertEquals(1, logger.infoMessages.size)
-        val message = logger.infoMessages.single()
+        assertEquals(emptyList(), logger.infoMessages, "the suppressed-entries line must not use Gradle's own --info level")
+        val suppressedMessages = logger.lifecycleMessages.filter { it.contains("suppressed") }
+        assertEquals(1, suppressedMessages.size, "expected exactly one suppressed-entries lifecycle line; got: ${logger.lifecycleMessages}")
+        val message = suppressedMessages.single()
         assertTrue(message.contains("1"), "message must name the suppressed count; got: $message")
         assertTrue(message.contains("suppressed"), "message must say suppressed; got: $message")
         assertTrue(message.contains("conflict-resolution losers"), "message must explain why; got: $message")
@@ -177,7 +184,7 @@ class DiagnosticsSummaryTest {
     }
 
     @Test
-    fun `non-verbose never prints the suppressed-entries info line`() {
+    fun `non-verbose never prints the suppressed-entries lifecycle line`() {
         val snapshot = DiagnosticsSnapshot(
             injections = listOf(injection("g:ui:1.12.0-beta01")),
             emptyDiscoveries = listOf(emptyDiscovery("g:ui:1.11.0-beta03"))
@@ -187,10 +194,11 @@ class DiagnosticsSummaryTest {
         DiagnosticsSummary.report(snapshot, tvosTargetsDetected = true, strictMode = false, verbose = false, logger = logger)
 
         assertEquals(emptyList(), logger.infoMessages)
+        assertTrue(logger.lifecycleMessages.none { it.contains("suppressed") }, "got: ${logger.lifecycleMessages}")
     }
 
     @Test
-    fun `verbose prints no suppressed-entries info line when nothing was suppressed`() {
+    fun `verbose prints no suppressed-entries lifecycle line when nothing was suppressed`() {
         val snapshot = DiagnosticsSnapshot(
             injections = emptyList(),
             emptyDiscoveries = listOf(emptyDiscovery("g:material-ripple:1.11.0-beta03"))
@@ -200,12 +208,14 @@ class DiagnosticsSummaryTest {
         DiagnosticsSummary.report(snapshot, tvosTargetsDetected = true, strictMode = false, verbose = true, logger = logger)
 
         assertEquals(emptyList(), logger.infoMessages)
+        assertEquals(emptyList(), logger.lifecycleMessages, "no injections happened and nothing was suppressed, so no lifecycle line at all is expected")
     }
 
-    /** Captures warn/info calls for assertions; delegates everything else to a real (silent) Logger. */
+    /** Captures warn/info/lifecycle calls for assertions; delegates everything else to a real (silent) Logger. */
     private class RecordingLogger : Logger by Logging.getLogger(RecordingLogger::class.java) {
         val warnMessages = mutableListOf<String>()
         val infoMessages = mutableListOf<String>()
+        val lifecycleMessages = mutableListOf<String>()
 
         override fun warn(message: String) {
             warnMessages += message
@@ -213,6 +223,10 @@ class DiagnosticsSummaryTest {
 
         override fun info(message: String) {
             infoMessages += message
+        }
+
+        override fun lifecycle(message: String) {
+            lifecycleMessages += message
         }
     }
 }

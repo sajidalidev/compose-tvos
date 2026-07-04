@@ -214,8 +214,20 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
      * lifetime caches used by every caller, [TvosVariantInjectionRule] included -- so after the
      * first lookup for a given official coordinate, every subsequent call here is a map hit, not
      * a re-fetch; no additional caching layer is added in this class.
+     *
+     * Task 10e: when this returns `true`, the skip is now also recorded into
+     * [TvosDiagnosticsBookkeeping]'s `skippedAlreadySupported` bookkeeping -- previously this
+     * mechanism's successes were recorded NOWHERE, so `DiagnosticsSummary.filterConflictLosers`
+     * (Task 10d) had no visibility into them and could not suppress a same-module
+     * conflict-resolution-loser `EmptyDiscoveryRecord` produced by [TvosVariantInjectionRule]
+     * elsewhere in the same build. The recorded `sourceModule` key
+     * (`groupId:baseModuleName:version`) intentionally matches the exact format
+     * [TvosVariantInjectionRule.execute] uses for the same umbrella module, so the two
+     * mechanisms' bookkeeping entries for the same coordinate line up under one key. Visibility
+     * is `internal` (not `private`) so this can be exercised directly by a unit test without a
+     * full GradleTestKit build (see `ComposeTvosRedirectPluginTest.kt`).
      */
-    private fun isOfficiallySupported(
+    internal fun isOfficiallySupported(
         groupId: String,
         moduleName: String,
         version: String,
@@ -233,7 +245,15 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
             logger = if (config.verbose) logger else null,
             offline = config.offline
         )
-        return TvosVariantDiscovery.isNativeTargetOfficiallySupported(officialVariants, suffix)
+        val alreadySupportedTargets = TvosVariantDiscovery.alreadySupportedNativeTargets(officialVariants)
+        val supported = TvosVariantDiscovery.isNativeTargetOfficiallySupported(officialVariants, suffix)
+        if (supported) {
+            val sourceModule = "$groupId:$baseModuleName:$version"
+            TvosDiagnosticsBookkeeping.recordSkippedAlreadySupported(
+                SkippedAlreadySupportedRecord(sourceModule, "$groupId:$moduleName:$version", alreadySupportedTargets.toList())
+            )
+        }
+        return supported
     }
 
     companion object {

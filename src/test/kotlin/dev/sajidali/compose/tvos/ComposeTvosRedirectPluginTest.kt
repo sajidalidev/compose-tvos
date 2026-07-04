@@ -1,11 +1,14 @@
 package dev.sajidali.compose.tvos
 
 import com.sun.net.httpserver.HttpServer
+import org.gradle.api.logging.Logging
 import org.gradle.testfixtures.ProjectBuilder
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -1062,5 +1065,106 @@ class VersionManifestLoaderTest {
         assertEquals(3, manifest!!.schema)
         assertEquals("1.13.0", manifest.gradlePlugin)
         assertEquals(1, manifest.mappings.size)
+    }
+}
+
+/**
+ * Task 10e: unit tests for [ComposeTvosRedirectPlugin.isOfficiallySupported]'s substitution-side
+ * diagnostics recording -- previously this mechanism's "already officially supported, skip
+ * substitution" successes were recorded NOWHERE, so `DiagnosticsSummary.filterConflictLosers`
+ * (Task 10d) had no visibility into them (see task-10d-report.md section 4). `isOfficiallySupported`
+ * is `internal` (not `private`) specifically so it can be exercised directly here, against a
+ * plain local `file://` fixture repository, without a full GradleTestKit consumer build.
+ */
+class ComposeTvosRedirectPluginIsOfficiallySupportedTest {
+
+    private val logger = Logging.getLogger(ComposeTvosRedirectPluginIsOfficiallySupportedTest::class.java)
+
+    @BeforeTest
+    @AfterTest
+    fun resetBookkeeping() {
+        TvosDiagnosticsBookkeeping.resetDiagnostics()
+        TvosVariantDiscovery.clearCache()
+    }
+
+    private fun configFor(tempDir: File, repositoryUrl: String): PluginConfiguration = PluginConfiguration(
+        verbose = false,
+        targetVersion = null,
+        additionalGroups = emptyMap(),
+        additionalArtifacts = emptyMap(),
+        versionMappings = emptyMap(),
+        manifestMappings = emptyMap(),
+        repositoryUrls = listOf(repositoryUrl),
+        cacheDirPath = File(tempDir, "cache").absolutePath,
+        offline = false
+    )
+
+    @Test
+    fun `isOfficiallySupported records a skip into the shared bookkeeping when the official artifact already ships the requested target`(
+        @TempDir tempDir: File
+    ) {
+        val groupId = "org.jetbrains.compose.subtest"
+        val baseModule = "subtest"
+        val version = "1.0.0-subtest-officially-supported"
+
+        val repoDir = File(tempDir, "repo")
+        val moduleFile = File(repoDir, "${groupId.replace('.', '/')}/$baseModule/$version/$baseModule-$version.module")
+        moduleFile.parentFile.mkdirs()
+        moduleFile.writeText(
+            """
+            {
+              "variants": [
+                {
+                  "name": "tvosArm64ApiElements",
+                  "attributes": { "org.jetbrains.kotlin.native.target": "tvos_arm64" },
+                  "available-at": { "module": "$baseModule-tvosarm64" }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        val supported = ComposeTvosRedirectPlugin().isOfficiallySupported(
+            groupId, "$baseModule-tvosarm64", version, configFor(tempDir, repoDir.toURI().toString()), logger
+        )
+
+        assertTrue(supported)
+        val snapshot = TvosDiagnosticsBookkeeping.diagnosticsSnapshot()
+        assertEquals(1, snapshot.skippedAlreadySupported.size)
+        val record = snapshot.skippedAlreadySupported.single()
+        assertEquals("$groupId:$baseModule:$version", record.sourceModule, "sourceModule must match the exact format TvosVariantInjectionRule uses for the same umbrella module")
+        assertEquals(listOf("tvos_arm64"), record.skippedNativeTargets)
+    }
+
+    @Test
+    fun `isOfficiallySupported records nothing when the official artifact does not ship the requested target`(
+        @TempDir tempDir: File
+    ) {
+        val groupId = "org.jetbrains.compose.subtest2"
+        val baseModule = "subtest2"
+        val version = "1.0.0-subtest-not-supported"
+
+        // No .module file published anywhere -- fetch fails, officialVariants comes back empty.
+        val emptyRepoDir = File(tempDir, "empty-repo")
+
+        val supported = ComposeTvosRedirectPlugin().isOfficiallySupported(
+            groupId, "$baseModule-tvosarm64", version, configFor(tempDir, emptyRepoDir.toURI().toString()), logger
+        )
+
+        assertFalse(supported)
+        val snapshot = TvosDiagnosticsBookkeeping.diagnosticsSnapshot()
+        assertEquals(emptyList(), snapshot.skippedAlreadySupported, "nothing must be recorded when the official artifact is not already supported")
+    }
+
+    @Test
+    fun `isOfficiallySupported returns false and records nothing for a non-tvOS-suffixed module name`(
+        @TempDir tempDir: File
+    ) {
+        val supported = ComposeTvosRedirectPlugin().isOfficiallySupported(
+            "org.jetbrains.compose.ui", "ui", "1.11.0", configFor(tempDir, File(tempDir, "unused-repo").toURI().toString()), logger
+        )
+
+        assertFalse(supported, "a bare umbrella module name (no tvOS suffix) is never officially-supported by this check")
+        assertEquals(emptyList(), TvosDiagnosticsBookkeeping.diagnosticsSnapshot().skippedAlreadySupported)
     }
 }

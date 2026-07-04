@@ -626,6 +626,67 @@ class ComposeTvosFunctionalTest {
         )
     }
 
+    // -- Task 10e: official-first successes must feed the SAME bookkeeping the WARN block --
+    // reads, from BOTH mechanisms (TvosVariantInjectionRule's rule-side empty-fork-discovery
+    // pre-check, and ComposeTvosRedirectPlugin's substitution-side isOfficiallySupported skip).
+
+    @Test
+    fun `an officially-supported module with NO fork publish at all resolves cleanly and never warns`(
+        @TempDir projectDir: File
+    ) {
+        // Distinct from the RUNTIME_VERSION fixture above (official AND fork BOTH publish
+        // tvosArm64 there -- fork discovery is non-empty, so the variant-level skip path is
+        // exercised instead): here the fork publishes NOTHING at all for this module@version --
+        // the genuine "would have injected but found nothing" shape from task-10d-report.md's
+        // residual-19 analysis (e.g. the demo's real lifecycle-common/lifecycle-viewmodel/
+        // savedstate-compose modules, which the OFFICIAL artifact already ships tvOS variants
+        // for but dev.sajidali never republishes at all).
+        //
+        // Before the Task 10e fix, TvosVariantInjectionRule's execute() only ran its
+        // official-first pre-check AFTER confirming the fork had something to inject, so this
+        // exact shape recorded a spurious EmptyDiscoveryRecord (a "genuine gap" WARN) even
+        // though nothing is actually wrong -- Gradle's own available-at edge resolves the
+        // official platform module fine, with or without this plugin's help. This is the
+        // red-first regression case for that fix (confirmed failing against pre-fix code, see
+        // task-10e-report.md).
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.runtime:runtime:$RUNTIME_NO_FORK_VERSION")
+
+        val result = runResolve(projectDir, target = "tvosArm64")
+
+        val resolved = result.resolvedLines()
+        val artifacts = result.artifactLines()
+        assertTrue(
+            resolved.any { it.contains("org.jetbrains.compose.runtime:runtime-tvosarm64:$RUNTIME_NO_FORK_VERSION") },
+            "must resolve through the OFFICIAL runtime-tvosarm64 platform module; got:\n${resolved.joinToString("\n")}"
+        )
+        assertTrue(
+            artifacts.any {
+                it.contains("org.jetbrains.compose.runtime:runtime-tvosarm64:$RUNTIME_NO_FORK_VERSION") &&
+                    it.contains("runtime-tvosarm64-$RUNTIME_NO_FORK_VERSION.klib")
+            },
+            "artifacts must come from the OFFICIAL platform module; got:\n${artifacts.joinToString("\n")}"
+        )
+        (resolved + artifacts).forEach { line ->
+            assertFalse(
+                line.contains("dev.sajidali.compose.runtime"),
+                "no dev.sajidali runtime node may appear -- the fork published nothing here: $line"
+            )
+        }
+        // Rule-side evidence (Task 10e item 1): the empty-fork-discovery branch recorded a
+        // skip, not a genuine gap, and said so under verbose.
+        assertTrue(
+            result.output.contains("Fork discovery found nothing for org.jetbrains.compose.runtime:runtime:$RUNTIME_NO_FORK_VERSION") &&
+                result.output.contains("no injection needed"),
+            "verbose output must record the rule-side official-first skip for this module; got:\n${result.output}"
+        )
+        assertFalse(
+            result.output.contains("[ComposeTvos] WARNING"),
+            "an officially-supported module with zero fork publish must never spuriously WARN just " +
+                "because the fork itself published nothing -- Gradle resolved the official variant " +
+                "fine on its own; got:\n${result.output}"
+        )
+    }
+
     // -- consumer project scaffolding ----------------------------------------------------
 
     private fun writeConsumerProject(
@@ -776,6 +837,18 @@ class ComposeTvosFunctionalTest {
         private const val RUNTIME_VERSION = "1.12.0-beta01"
 
         /**
+         * Task 10e: a version at which the OFFICIAL umbrella already ships a genuine tvosArm64
+         * variant, like [RUNTIME_VERSION] -- but, unlike [RUNTIME_VERSION], the fork publishes
+         * NOTHING at all here (no `dev.sajidali.compose.runtime:runtime` counterpart is
+         * published at this version below), reproducing the real "genuine fork gap, but the
+         * official artifact already covers it" shape from task-10d-report.md's residual-19
+         * analysis -- distinct from [RUNTIME_VERSION]'s "fork ALSO publishes it" shape, which
+         * exercises the older (Task 10b) variant-level skip path instead of this fork-discovery-
+         * EMPTY path.
+         */
+        private const val RUNTIME_NO_FORK_VERSION = "1.13.0-beta01"
+
+        /**
          * Task 10d (Phase 4 closeout): an OLD, upstream-only (no dev.sajidali fork counterpart)
          * version of `org.jetbrains.compose.ui:ui`, numerically lower than [COMPOSE_VERSION] so
          * Gradle's own conflict resolution reliably picks [COMPOSE_VERSION] as the winner when
@@ -872,6 +945,15 @@ class ComposeTvosFunctionalTest {
                 // exact collision TvosVariantInjectionRule must now skip rather than inject.
                 publishUmbrellaWithPlatforms(
                     "dev.sajidali.compose.runtime", "runtime", RUNTIME_VERSION,
+                    listOf(FixtureNativeTarget.TVOS_ARM64)
+                )
+                // Task 10e: official umbrella that ALSO already ships a real tvosArm64 variant
+                // -- but, deliberately, NO "dev.sajidali.compose.runtime:runtime" counterpart is
+                // published at RUNTIME_NO_FORK_VERSION at all (contrast with RUNTIME_VERSION
+                // just above, which publishes both). Reproduces the empty-fork-discovery,
+                // official-already-covers-it shape.
+                publishUmbrellaWithPlatforms(
+                    "org.jetbrains.compose.runtime", "runtime", RUNTIME_NO_FORK_VERSION,
                     listOf(FixtureNativeTarget.TVOS_ARM64)
                 )
             }

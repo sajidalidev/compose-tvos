@@ -118,13 +118,14 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         }
 
         settings.gradle.settingsEvaluated { evaluatedSettings ->
-            // Diagnostics bookkeeping (Task 5 / defect D1) lives at the companion-object level
-            // in TvosVariantInjectionRule / ComposeTvosRedirectPlugin, which -- like the
-            // existing variant-discovery caches -- outlives a single build in a warm Gradle
-            // daemon. Reset here, once per (re-)configured build, so the end-of-build summary
-            // reports only THIS build's state rather than accumulating stale entries from a
-            // previous build sharing the same daemon.
-            TvosVariantInjectionRule.resetDiagnostics()
+            // Diagnostics bookkeeping (Task 5 / defect D1) lives in TvosDiagnosticsBookkeeping
+            // (Task 10e: shared by both TvosVariantInjectionRule and ComposeTvosRedirectPlugin,
+            // see that object's KDoc), which -- like the existing variant-discovery caches --
+            // outlives a single build in a warm Gradle daemon. Reset here, once per
+            // (re-)configured build, so the end-of-build summary reports only THIS build's
+            // state rather than accumulating stale entries from a previous build sharing the
+            // same daemon.
+            TvosDiagnosticsBookkeeping.resetDiagnostics()
             ComposeTvosRedirectPlugin.resetTvosTargetDetection()
 
             val verbose = extension.verbose.get()

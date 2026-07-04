@@ -64,7 +64,7 @@ abstract class TvosDiagnosticsService : BuildService<TvosDiagnosticsServiceParam
 
     override fun close() {
         DiagnosticsSummary.report(
-            snapshot = TvosVariantInjectionRule.diagnosticsSnapshot(),
+            snapshot = TvosDiagnosticsBookkeeping.diagnosticsSnapshot(),
             tvosTargetsDetected = ComposeTvosRedirectPlugin.tvosTargetsDetected,
             strictMode = parameters.strictMode.getOrElse(false),
             verbose = parameters.verbose.getOrElse(false),
