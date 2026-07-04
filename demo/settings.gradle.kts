@@ -23,43 +23,43 @@ plugins {
 composeTvos {
     verbose.set(true)
 
-    // KNOWN BLOCKER (task-10-report.md): even with every version-mapping override below
-    // applied, tvosArm64/tvosSimulatorArm64 dependency resolution still fails with an
-    // unresolvable Gradle variant AMBIGUITY on org.jetbrains.compose.runtime:runtime:1.12.0-beta01
-    // (and, in this dev machine's mavenLocal state, material3/lifecycle-viewmodel-compose too):
-    // JetBrains' own dev-repo publish of runtime:1.12.0-beta01 already ships a native
-    // 'tvosArm64ApiElements-published' variant, and TvosVariantInjectionRule unconditionally
-    // adds a second, identically-attributed 'tvosArm64ApiElements-published-injected' variant
-    // regardless of whether the source component already has one -- Gradle then cannot choose
-    // between them for ANY consumer, and no consumer-side config (versionMappings included)
-    // can fix that. This is a src/main defect (this task does not modify src/main); see the
-    // report for the exact reproduction and recommended fix.
-
-    // Verification-discovered version-mapping overrides (see task-10-report.md "Version
-    // mapping gaps" section for the full investigation). The remote manifest is stale
-    // relative to what is CURRENTLY published under dev.sajidali in mavenLocal; these local
-    // overrides (documented, supported per README's "Version conflicts" troubleshooting
-    // section, and applied on top of the manifest per composeTvos's own precedence rules)
-    // realign the requested/official version each DSL accessor or dependency below actually
-    // resolves to with the version dev.sajidali has actually published:
-    //   - material3: DSL requests org.jetbrains.compose.material3:material3:1.11.0-alpha07
-    //     (material3 tracks its own alpha version line, independent of compose.version);
-    //     dev.sajidali only republished material3 at 1.5.0-alpha22 (Task 2/3).
-    //   - androidx.lifecycle: the fork's own ui-tvosarm64 POM transitively requests
-    //     lifecycle-runtime-compose/lifecycle-viewmodel/lifecycle-viewmodel-savedstate at
-    //     2.9.6 (inherited from whatever official ui release these were built against);
-    //     dev.sajidali only republished the androidx.lifecycle line at 2.11.0.
-    //   - androidx.savedstate: same story, transitively requested at 1.3.6; dev.sajidali
-    //     only republished at 1.5.0-alpha01.
+    // Task 10b/10b-review fixed the runtime/foundation/ui-line variant-injection and
+    // dependency-substitution ambiguity: TvosVariantInjectionRule and
+    // ComposeTvosRedirectPlugin's dependencySubstitution now both check whether the OFFICIAL
+    // artifact already ships a genuine native tvOS variant before touching a coordinate ("official-
+    // first"), so compose.runtime/compose.foundation/compose.ui and, on this machine,
+    // material3/androidx.lifecycle/androidx.savedstate (whichever already publish real tvOS
+    // klibs upstream at the exact requested version) resolve straight through to their OWN
+    // official coordinates -- no versionMappings entry, no dev.sajidali involvement at all.
+    //
+    // Reassessed (task-10c) against task-10-report.md's original 5-entry list: 3 entries were
+    // dropped because they no longer do anything useful --
+    //   - androidx.lifecycle 2.9.6->2.11.0 / androidx.savedstate 1.3.6->1.5.0-alpha01: both were
+    //     pinned to a transitive version Gradle no longer selects (the graph now resolves
+    //     androidx.lifecycle/androidx.savedstate to 2.11.0-rc01/1.4.0), AND -- verified directly
+    //     against the live JetBrains dev-repo module metadata -- both groups genuinely publish
+    //     real tvOS klib variants upstream at THOSE versions, so the official-first check would
+    //     resolve them without a mapping at any version. Neither entry is needed on any machine.
+    //
+    // 2 entries remain, confirmed still required by direct live-repo checks (not just this
+    // machine's mavenLocal state) -- these are the actual Phase 5 manifest deliverable:
+    //   - org.jetbrains.compose.material3:material3:1.11.0-alpha07 has NO tvOS variant on the
+    //     real JetBrains dev repo (23 variants, none tvOS); dev.sajidali only republished
+    //     material3 at 1.5.0-alpha22, a different version line entirely (material3 tracks its
+    //     own alpha line, independent of compose.version). Without this mapping, resolution
+    //     fails outright on a clean machine (this dev machine's mavenLocal happens to carry a
+    //     stale, superseded org.jetbrains.compose.material3:1.11.0-alpha07 publish from an
+    //     earlier phase that also has a tvOS variant, masking the gap locally -- see
+    //     task-10-report.md §4.1 -- but that is machine-specific pollution, not a fact a clean
+    //     consumer machine can rely on).
+    //   - org.jetbrains.androidx.navigation:navigation-compose has NO tvOS variant upstream at
+    //     ANY version (confirmed live, 23 variants none tvOS); dev.sajidali only republished it
+    //     at 2.10.0-alpha05, while the latest real official release (used in commonMain so
+    //     iOS/Android also resolve it) is 2.10.0-alpha02. Removing this mapping reproduces
+    //     "Could not resolve org.jetbrains.androidx.navigation:navigation-compose:2.10.0-alpha02"
+    //     immediately (verified during this reassessment).
     versionMappings.put("org.jetbrains.compose.material3:1.11.0-alpha07", "1.5.0-alpha22")
-    versionMappings.put("org.jetbrains.androidx.lifecycle:2.9.6", "2.11.0")
-    versionMappings.put("org.jetbrains.androidx.savedstate:1.3.6", "1.5.0-alpha01")
-    // navigation-compose / lifecycle-viewmodel-compose below are declared in commonMain at
-    // real, officially-published versions (so iOS/Android also resolve them); these two
-    // artifact-exact overrides realign them to dev.sajidali's actual published versions
-    // (2.10.0-alpha05 / 2.11.0) -- see build.gradle.kts.
     versionMappings.put("org.jetbrains.androidx.navigation:navigation-compose:2.10.0-alpha02", "2.10.0-alpha05")
-    versionMappings.put("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0-rc01", "2.11.0")
 }
 
 dependencyResolutionManagement {

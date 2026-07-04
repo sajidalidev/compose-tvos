@@ -61,3 +61,48 @@ kotlin {
 compose.resources {
     packageOfResClass = "demo.generated.resources"
 }
+
+// task-10c: this dev machine's mavenLocal carries a stale, complete org.jetbrains.compose.*
+// publish at 1.11.0 left over from an earlier phase (predating the dev.sajidali-fork-plus-
+// injection design; see task-10-report.md §4.1/§7.3). material3:1.11.0-alpha07's own POM
+// transitively requests org.jetbrains.compose.{ui,foundation-layout,animation,...} at 1.11.0,
+// and because that STALE local 1.11.0 publish also genuinely carries real tvOS klibs, the
+// official-first check (correctly) leaves it unsubstituted -- while runtime/foundation's OWN
+// direct request for the SAME modules at 1.12.0-beta01 (no official tvOS variant at that
+// version) correctly redirects to the dev.sajidali fork. Two different module coordinates
+// (org.jetbrains.compose.ui:ui-tvosarm64 vs dev.sajidali.compose.ui:ui-tvosarm64) for the
+// same underlying Kotlin classes then both end up in the same tvOS link graph, and the
+// Kotlin/Native linker fails with a duplicate-symbol error ("IrPropertySymbolImpl is already
+// bound") for classes both klibs define (e.g. AbsoluteAlignment).
+//
+// This is NOT the components-resources 1.11.0/1.12.0-beta01 ABI risk flagged going into this
+// task (that one never reproduced) and is not expected to reproduce on a clean machine: on a
+// clean mavenLocal, material3:1.11.0-alpha07 genuinely has no official tvOS variant (verified
+// directly against the live JetBrains dev repo -- 23 variants, none tvOS), so it would redirect
+// via composeTvos.versionMappings (settings.gradle.kts) to the dev.sajidali fork uniformly,
+// with no org.jetbrains.compose.ui:1.11.0 edge ever entering the graph.
+//
+// The fix is scoped narrowly, twice over:
+//  1. Only the exact modules observed on BOTH sides of the duplicate (requested at 1.11.0 via
+//     material3's transitive graph AND at 1.12.0-beta01 via runtime/foundation's direct graph)
+//     are forced. org.jetbrains.compose.material3 itself is excluded (tracks its own alpha
+//     line, handled by versionMappings), and so are org.jetbrains.compose.collection-internal /
+//     annotation-internal / material (material-ripple) -- these are requested ONLY at 1.11.0
+//     nowhere else in the graph, have no dev.sajidali publish at 1.12.0-beta01 (confirmed 404
+//     on the live JetBrains dev repo too), and forcing them broke resolution outright.
+//  2. Only configurations whose name contains "tvos" are touched, so iosArm64 (gate (d)'s
+//     "zero dev.sajidali, untouched" control target) never sees this override at all.
+val duplicateKlibRiskModules = setOf(
+    "ui", "ui-uikit", "ui-backhandler", "ui-text", "ui-util", "ui-graphics", "ui-unit", "ui-geometry",
+    "animation", "animation-core", "foundation-layout"
+)
+configurations.matching { it.name.contains("tvos", ignoreCase = true) }.configureEach {
+    resolutionStrategy.eachDependency {
+        if (requested.group.startsWith("org.jetbrains.compose.") && requested.name in duplicateKlibRiskModules) {
+            useVersion("1.12.0-beta01")
+            because("align the compose.ui/foundation-layout/animation family to a single " +
+                "version to avoid linking both an official (mavenLocal-pollution) and a " +
+                "dev.sajidali klib for the same class, tvOS targets only")
+        }
+    }
+}
