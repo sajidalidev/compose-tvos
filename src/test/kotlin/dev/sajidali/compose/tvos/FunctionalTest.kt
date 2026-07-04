@@ -438,6 +438,55 @@ class ComposeTvosFunctionalTest {
         )
     }
 
+    // -- Task 10d (Phase 4 closeout): suppress conflict-resolution-loser empty discoveries --
+
+    @Test
+    fun `a module requested at two conflicting versions in the same graph resolves cleanly and never warns`(
+        @TempDir projectDir: File
+    ) {
+        // Consumer-visible regression guard for the gate (e) fix (task-10c-report.md): a module
+        // requested at an OLD, fork-less version (OLD_LOSER_VERSION) alongside a direct request
+        // at COMPOSE_VERSION (which DOES have a working dev.sajidali fork) in the SAME graph.
+        // Gradle's own conflict resolution keeps only COMPOSE_VERSION here.
+        //
+        // NOTE (task-10d): this harness's hand-rolled `resolveGraph` task resolves exactly ONE
+        // Gradle configuration, and -- verified empirically while writing this test, both for a
+        // second DIRECT dependency and for a transitive one declared via a dedicated third-party
+        // umbrella fixture -- Gradle's conflict resolution for two plain STATIC version requests
+        // on the same module resolves the winner via version-string comparison alone, without
+        // ever fetching metadata for (and therefore without ever firing
+        // TvosVariantInjectionRule's ComponentMetadataRule on) the losing candidate, when only
+        // ONE configuration is involved. The real gate (e) 11-entry WARN noise came from the
+        // full `compileKotlinTvosArm64`/`compileKotlinTvosSimulatorArm64` KGP task graph, which
+        // resolves MANY additional Kotlin-Multiplatform-internal configurations beyond the one
+        // this harness's custom task queries -- reproducing that exact multi-configuration shape
+        // here is not practical (see task-10d-report.md for the full analysis). This test
+        // therefore stands as a plain regression guard (correct resolution, no WARN) rather than
+        // as evidence the NEW suppression branch itself executed; [DiagnosticsSummaryTest] is
+        // the authoritative, red/green TDD evidence for the filter logic itself, and the real
+        // demo re-run (also in task-10d-report.md) is the authoritative end-to-end evidence that
+        // the fix eliminates the actual reported noise.
+        writeConsumerProject(
+            projectDir,
+            dependency = "org.jetbrains.compose.ui:ui:$COMPOSE_VERSION",
+            extraDependencies = listOf("org.jetbrains.compose.ui:ui:$OLD_LOSER_VERSION")
+        )
+
+        val result = runResolve(projectDir, target = "tvosArm64")
+
+        val resolved = result.resolvedLines()
+        assertTrue(
+            resolved.any { it.contains("dev.sajidali.compose.ui:ui-tvosarm64:$COMPOSE_VERSION") },
+            "the winning version must still resolve through the fork platform module; got:\n${resolved.joinToString("\n")}"
+        )
+        assertFalse(
+            result.output.contains("[ComposeTvos] WARNING"),
+            "a module resolving cleanly at its winning version must never WARN, regardless of " +
+                "an older, fork-less version also being requested elsewhere in the graph; " +
+                "got:\n${result.output}"
+        )
+    }
+
     // -- Task 10b (Phase 4 blocker fix): skip injection for natively-supported targets ---
 
     @Test
@@ -726,6 +775,15 @@ class ComposeTvosFunctionalTest {
          */
         private const val RUNTIME_VERSION = "1.12.0-beta01"
 
+        /**
+         * Task 10d (Phase 4 closeout): an OLD, upstream-only (no dev.sajidali fork counterpart)
+         * version of `org.jetbrains.compose.ui:ui`, numerically lower than [COMPOSE_VERSION] so
+         * Gradle's own conflict resolution reliably picks [COMPOSE_VERSION] as the winner when
+         * both are requested in the same graph -- the "conflict-resolution loser" shape gate (e)
+         * of task-10c-report.md observed on the real demo build.
+         */
+        private const val OLD_LOSER_VERSION = "1.10.0"
+
         private val pluginRepo = File(requireNotNull(System.getProperty("functionalTest.pluginRepo")))
         private val pluginVersion = requireNotNull(System.getProperty("functionalTest.pluginVersion"))
         private val testKitDir = File(requireNotNull(System.getProperty("functionalTest.testKitDir")))
@@ -793,6 +851,13 @@ class ComposeTvosFunctionalTest {
                 // to find out either way, so its absence is irrelevant to what's being tested.
                 publishUmbrellaWithPlatforms(
                     "org.jetbrains.compose.ui", "ui", COLD_VERSION,
+                    listOf(FixtureNativeTarget.IOS_ARM64)
+                )
+                // Task 10d: an old, upstream-only (no fork) version of ui, used purely as a
+                // losing conflict-resolution candidate alongside COMPOSE_VERSION in the same
+                // graph -- never resolved/injected itself, only ever seen by the metadata rule.
+                publishUmbrellaWithPlatforms(
+                    "org.jetbrains.compose.ui", "ui", OLD_LOSER_VERSION,
                     listOf(FixtureNativeTarget.IOS_ARM64)
                 )
                 // Task 10b: official umbrella that ALREADY ships a real tvosArm64 variant

@@ -7,6 +7,7 @@ import org.gradle.api.services.BuildServiceParameters
 
 interface TvosDiagnosticsServiceParams : BuildServiceParameters {
     val strictMode: Property<Boolean>
+    val verbose: Property<Boolean>
 }
 
 /**
@@ -66,6 +67,7 @@ abstract class TvosDiagnosticsService : BuildService<TvosDiagnosticsServiceParam
             snapshot = TvosVariantInjectionRule.diagnosticsSnapshot(),
             tvosTargetsDetected = ComposeTvosRedirectPlugin.tvosTargetsDetected,
             strictMode = parameters.strictMode.getOrElse(false),
+            verbose = parameters.verbose.getOrElse(false),
             logger = logger
         )
     }

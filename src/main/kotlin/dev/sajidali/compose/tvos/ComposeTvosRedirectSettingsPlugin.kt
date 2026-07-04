@@ -181,6 +181,7 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
                 TvosDiagnosticsService::class.java
             ) { spec ->
                 spec.parameters.strictMode.set(extension.strictMode)
+                spec.parameters.verbose.set(extension.verbose)
             }
             // Force creation now: an unused/never-`.get()` build service is never
             // instantiated, and Gradle only calls close() on build services it actually
