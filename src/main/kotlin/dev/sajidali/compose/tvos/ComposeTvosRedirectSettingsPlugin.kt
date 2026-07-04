@@ -40,6 +40,62 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         // (e.g. under GradleTestKit, where it differs from `user.home`).
         val cacheRoot = settings.startParameter.gradleUserHomeDir
 
+        // -- Task 9b (defect D13): org.jetbrains.compose plugin-marker interception -------
+        //
+        // Populated below, inside the settingsEvaluated block, once the manifest has been
+        // fetched. Declared here (not there) so the eachPlugin callback registered just
+        // below -- which captures it by reference -- can see whatever value it holds BY THE
+        // TIME THE CALLBACK ACTUALLY RUNS, not at registration time.
+        var manifestGradlePluginVersion: String? = null
+
+        // eachPlugin rules must be REGISTERED here, at apply() time: this method runs
+        // synchronously while the settings script's own `plugins {}` block is still being
+        // processed (this plugin IS one of those requests), i.e. strictly before
+        // pluginManagement resolves any *later* plugin request. The only realistic later
+        // requests are project build scripts' `plugins {}` blocks.
+        //
+        // Timing verified empirically (see task-9b-report.md): `extension` (configured by
+        // the settings script's `composeTvos {}` block, which — like the whole rest of the
+        // settings script — finishes evaluating before `settingsEvaluated` fires) and
+        // `manifestGradlePluginVersion` (assigned inside settingsEvaluated below) are BOTH
+        // fully populated by the time a PROJECT build script's `plugins {}` block triggers
+        // this callback, because Gradle only resolves project-level plugin requests once
+        // project configuration begins — always strictly after settingsEvaluated. Reading
+        // `extension`/`manifestGradlePluginVersion` lazily INSIDE the callback body (never
+        // at registration time, when neither is populated yet) is what makes this work.
+        settings.pluginManagement.resolutionStrategy.eachPlugin { details ->
+            if (details.requested.id.id == COMPOSE_GRADLE_PLUGIN_ID) {
+                val intercept = extension.interceptComposeGradlePlugin.getOrElse(true)
+                if (intercept) {
+                    // First non-null wins: extension override -> manifest `gradlePlugin`
+                    // field -> the requested version itself (same-version convention).
+                    val version = extension.composeGradlePluginVersion.orNull
+                        ?: manifestGradlePluginVersion
+                        ?: details.requested.version
+                    if (version != null) {
+                        details.useModule("$COMPOSE_GRADLE_PLUGIN_COORDINATE:$version")
+                    }
+                }
+            }
+        }
+
+        // Repositories the substituted module above resolves from. Opt-out
+        // (interceptComposeGradlePlugin=false) is a `Property` read lazily inside the
+        // eachPlugin callback, so it is NOT knowable here at apply() time -- pragmatically,
+        // these are always appended. That is harmless: they are pure additions (never
+        // removals/reordering) placed AFTER whatever the consumer's settings script already
+        // declared (including any gradlePluginPortal() call, which is left untouched and
+        // still resolves ordinary, non-intercepted plugin markers exactly as before), so
+        // Gradle tries the consumer's own repositories first and only falls through to
+        // these for coordinates the consumer's repositories don't have -- e.g. our
+        // substituted dev.sajidali.compose:compose-gradle-plugin. Gradle also dedups
+        // repositories by URL, so a consumer who already declares mavenCentral()/
+        // mavenLocal() themselves gets no duplicate entry.
+        settings.pluginManagement.repositories.apply {
+            mavenCentral()
+            mavenLocal()
+        }
+
         settings.gradle.settingsEvaluated { evaluatedSettings ->
             // Diagnostics bookkeeping (Task 5 / defect D1) lives at the companion-object level
             // in TvosVariantInjectionRule / ComposeTvosRedirectPlugin, which -- like the
@@ -53,13 +109,19 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
             val verbose = extension.verbose.get()
             val offline = evaluatedSettings.gradle.startParameter.isOffline
             val repositoryUrls = collectRepositoryUrls(evaluatedSettings, extension)
-            val manifestMappings = VersionManifestLoader.load(
+            val loadedManifest = VersionManifestLoader.loadManifest(
                 manifestUrl = extension.manifestUrl.orNull,
                 cacheDir = cacheRoot,
                 refreshDependencies = evaluatedSettings.gradle.startParameter.isRefreshDependencies,
                 logger = if (verbose) logger else null,
                 offline = offline
             )
+            val manifestMappings = loadedManifest?.mappings ?: emptyMap()
+            // Read by the eachPlugin callback registered earlier in apply() -- see the
+            // Task 9b comment there for why a plain var capture (not a Property/Provider)
+            // is sufficient: the callback only ever fires for project build scripts'
+            // plugin requests, which happen strictly after this settingsEvaluated block.
+            manifestGradlePluginVersion = loadedManifest?.gradlePlugin
 
             if (verbose) {
                 logger.lifecycle("[ComposeTvosRedirect] Settings plugin applied")
@@ -193,6 +255,12 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
 
     companion object {
         const val SHARED_CONFIG_KEY = "composeTvosRedirect.config"
+
+        /** The upstream plugin id intercepted by the Task 9b plugin-marker substitution. */
+        private const val COMPOSE_GRADLE_PLUGIN_ID = "org.jetbrains.compose"
+
+        /** `group:artifact` of the tvOS-patched fork the id above is substituted to. */
+        private const val COMPOSE_GRADLE_PLUGIN_COORDINATE = "dev.sajidali.compose:compose-gradle-plugin"
     }
 }
 

@@ -12,6 +12,7 @@ All notable changes to this project are documented in this file.
 - `strictMode` option.
 - Deterministic tie-breaking for version-mapping resolution.
 - Redirect coverage expanded from 8 to 15 groups: lifecycle, savedstate, navigationevent, navigation3, annotation-internal, collection-internal, material3.adaptive.
+- `org.jetbrains.compose` plugin-marker interception: `plugins { id("org.jetbrains.compose") }` in consumer project build scripts is now transparently substituted (via `pluginManagement.resolutionStrategy.eachPlugin`) to the tvOS-patched `dev.sajidali.compose:compose-gradle-plugin` fork, giving tvOS resource packaging support with no consumer-side plugin-id change. Version resolution: `composeGradlePluginVersion` extension property -> manifest `gradlePlugin` field -> requested version (same-version convention). Opt out with `interceptComposeGradlePlugin.set(false)`.
 
 ### Changed
 - Gradle Module Metadata is now parsed with a real JSON parser.

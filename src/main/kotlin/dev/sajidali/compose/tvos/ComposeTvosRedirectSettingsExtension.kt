@@ -114,6 +114,27 @@ abstract class ComposeTvosRedirectSettingsExtension @Inject constructor(
      */
     val strictMode: Property<Boolean> = objects.property(Boolean::class.java).convention(false)
 
+    /**
+     * When true (the default), a `plugins { id("org.jetbrains.compose") }` request in a
+     * consumer project build script is transparently intercepted via
+     * `pluginManagement.resolutionStrategy.eachPlugin` and substituted (`useModule`) to the
+     * tvOS-patched `dev.sajidali.compose:compose-gradle-plugin` fork -- the same fork that
+     * publishes the resource-packaging support tvOS builds need -- so consumers get tvOS
+     * resource packaging with no consumer-side plugin-id change. Set to false to resolve
+     * `org.jetbrains.compose` normally (Gradle Plugin Portal / JetBrains Space), e.g. if a
+     * consumer wants to pin the official, unpatched plugin.
+     */
+    val interceptComposeGradlePlugin: Property<Boolean> =
+        objects.property(Boolean::class.java).convention(true)
+
+    /**
+     * Optional version override for the substituted `dev.sajidali.compose:compose-gradle-plugin`
+     * artifact (see [interceptComposeGradlePlugin]). Version resolution, first non-null wins:
+     * this property -> the manifest's `gradlePlugin` field -> the REQUESTED plugin version
+     * (same-version convention, mirroring [versionMappings]'s default).
+     */
+    val composeGradlePluginVersion: Property<String> = objects.property(String::class.java)
+
     companion object {
         const val NAME = "composeTvos"
     }

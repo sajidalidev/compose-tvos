@@ -822,4 +822,37 @@ class VersionManifestLoaderTest {
         assertNotNull(mappings)
         assertTrue(mappings!!.isEmpty())
     }
+
+    // -- Task 9b (defect D13): schema 2 gradlePlugin field --------------------------------
+
+    @Test
+    fun `parseManifest extracts the gradlePlugin field from a schema 2 manifest`() {
+        val json = """
+        {
+          "schema": 2,
+          "mappings": {"org.jetbrains.compose.material3:1.10.*": "1.10.0-alpha05"},
+          "gradlePlugin": "1.12.0-beta01"
+        }
+        """.trimIndent()
+
+        val manifest = VersionManifestLoader.parseManifest(json, null)
+        assertNotNull(manifest)
+        assertEquals("1.12.0-beta01", manifest!!.gradlePlugin)
+        assertEquals(1, manifest.mappings.size)
+    }
+
+    @Test
+    fun `parseManifest tolerates a schema 1 manifest with no gradlePlugin field`() {
+        val json = """
+        {
+          "schema": 1,
+          "mappings": {"org.jetbrains.compose.material3:1.10.*": "1.10.0-alpha05"}
+        }
+        """.trimIndent()
+
+        val manifest = VersionManifestLoader.parseManifest(json, null)
+        assertNotNull(manifest)
+        assertNull(manifest!!.gradlePlugin)
+        assertEquals(1, manifest.mappings.size)
+    }
 }

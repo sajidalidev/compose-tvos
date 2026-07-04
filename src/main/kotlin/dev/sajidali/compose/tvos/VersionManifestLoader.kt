@@ -14,11 +14,19 @@ import java.security.MessageDigest
  * The mapping keys use the same scope syntax as user-supplied [ComposeVersions.normalizeMappings]
  * input — `groupId:versionPattern`, `groupId.*:versionPattern`, `groupId:artifactId:versionPattern`,
  * or `*:versionPattern`. Versions accept `1.10.*` wildcards.
+ *
+ * `gradlePlugin` (schema 2+) optionally pins the version of the substituted
+ * `dev.sajidali.compose:compose-gradle-plugin` artifact used by the `org.jetbrains.compose`
+ * plugin-marker interception (see [ComposeTvosRedirectSettingsPlugin]). `ignoreUnknownKeys`
+ * on the shared [Json] instance means schema-1 manifests (missing this field entirely) still
+ * parse fine -- `gradlePlugin` simply stays null -- so both schema 1 and schema 2 documents
+ * are accepted on read; `schema` itself is otherwise informational and never validated here.
  */
 @Serializable
 internal data class VersionManifest(
     val schema: Int = 1,
-    val mappings: Map<String, String> = emptyMap()
+    val mappings: Map<String, String> = emptyMap(),
+    val gradlePlugin: String? = null
 )
 
 /**
@@ -46,8 +54,23 @@ internal object VersionManifestLoader {
         refreshDependencies: Boolean,
         logger: Logger? = null,
         offline: Boolean = false
-    ): Map<String, String> {
-        if (manifestUrl.isNullOrBlank()) return emptyMap()
+    ): Map<String, String> =
+        loadManifest(manifestUrl, cacheDir, refreshDependencies, logger, offline)?.mappings ?: emptyMap()
+
+    /**
+     * Same fetch/cache/degrade behavior as [load], but returns the full parsed
+     * [VersionManifest] (mappings + [VersionManifest.gradlePlugin]) instead of just the
+     * mappings, so a single fetch/cache round-trip per build can serve both consumers
+     * (the settings plugin reads both from one call).
+     */
+    fun loadManifest(
+        manifestUrl: String?,
+        cacheDir: File,
+        refreshDependencies: Boolean,
+        logger: Logger? = null,
+        offline: Boolean = false
+    ): VersionManifest? {
+        if (manifestUrl.isNullOrBlank()) return null
 
         val cacheFile = cacheFileFor(cacheDir, manifestUrl)
         val cacheFresh = !refreshDependencies &&
@@ -55,14 +78,14 @@ internal object VersionManifestLoader {
             (System.currentTimeMillis() - cacheFile.lastModified()) < CACHE_TTL_MS
 
         if (cacheFresh) {
-            parse(cacheFile.readText(), logger)?.let { return it }
+            parseManifest(cacheFile.readText(), logger)?.let { return it }
         }
 
         if (offline) {
             // Never fetch while offline: fresh-or-stale cache is used if present at all,
             // otherwise degrade to the same-version convention (empty mappings).
             if (cacheFile.exists()) {
-                parse(cacheFile.readText(), logger)?.let {
+                parseManifest(cacheFile.readText(), logger)?.let {
                     logger?.info("[ComposeTvosRedirect] Offline: using cached version manifest (network skipped)")
                     return it
                 }
@@ -71,18 +94,18 @@ internal object VersionManifestLoader {
                 "[ComposeTvosRedirect] Offline: no cached version manifest available; " +
                     "falling back to same-version convention"
             )
-            return emptyMap()
+            return null
         }
 
         val fetched = fetch(manifestUrl, logger)
         if (fetched != null) {
             writeCache(cacheFile, fetched)
-            parse(fetched, logger)?.let { return it }
+            parseManifest(fetched, logger)?.let { return it }
         }
 
         // Network failed — try whatever we have on disk, even if stale.
         if (cacheFile.exists()) {
-            parse(cacheFile.readText(), logger)?.let {
+            parseManifest(cacheFile.readText(), logger)?.let {
                 logger?.info("[ComposeTvosRedirect] Using cached version manifest (network unavailable)")
                 return it
             }
@@ -93,7 +116,7 @@ internal object VersionManifestLoader {
                 "falling back to same-version convention. Override with composeTvos.versionMappings " +
                 "if a fork uses a different version than upstream."
         )
-        return emptyMap()
+        return null
     }
 
     private fun fetch(manifestUrl: String, logger: Logger?): String? = try {
@@ -112,8 +135,11 @@ internal object VersionManifestLoader {
         null
     }
 
-    internal fun parse(text: String, logger: Logger?): Map<String, String>? = try {
-        json.decodeFromString(VersionManifest.serializer(), text).mappings
+    internal fun parse(text: String, logger: Logger?): Map<String, String>? =
+        parseManifest(text, logger)?.mappings
+
+    internal fun parseManifest(text: String, logger: Logger?): VersionManifest? = try {
+        json.decodeFromString(VersionManifest.serializer(), text)
     } catch (e: Exception) {
         logger?.warn("[ComposeTvosRedirect] Manifest parse failed: ${e.message}")
         null

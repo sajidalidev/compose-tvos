@@ -651,6 +651,253 @@ class ComposeTvosFunctionalTest {
 }
 
 /**
+ * Task 9b (defect D13) functional tests: `org.jetbrains.compose` plugin-marker interception.
+ *
+ * Most of these assert at RESOLUTION level rather than successful plugin application: the
+ * consumer project's build script requests `id("org.jetbrains.compose") version "<distinctive
+ * version>"` and the build is asserted to `buildAndFail()` with the FAILURE MESSAGE naming
+ * the expected `dev.sajidali.compose:compose-gradle-plugin:<version>` coordinate -- proof
+ * that `useModule` fired with exactly the right substituted coordinate and version, entirely
+ * without needing a real, compiled `Plugin<Project>` class published at that coordinate (see
+ * task-9b-report.md for why building a fake jar with a real compiled plugin class was
+ * rejected as needlessly heavy for this).
+ *
+ * The last test in this class goes one step further with a REAL (but deliberately
+ * non-functional, no compiled class) jar published at the exact substituted coordinate, to
+ * additionally prove that Gradle's plugin resolution machinery actually FETCHES the
+ * substituted artifact (not just that the coordinate string was constructed correctly).
+ */
+class ComposePluginInterceptionFunctionalTest {
+
+    @Test
+    fun `org_jetbrains_compose plugin request is substituted to the tvOS fork by default`(
+        @TempDir projectDir: File
+    ) {
+        writeComposePluginConsumer(projectDir, requestedVersion = "9.9.9")
+
+        val result = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("help", "--console=plain")
+            .buildAndFail()
+
+        assertTrue(
+            result.output.contains("dev.sajidali.compose:compose-gradle-plugin:9.9.9"),
+            "default interception must substitute org.jetbrains.compose to the fork coordinate " +
+                "at the requested version; got:\n${result.output}"
+        )
+    }
+
+    @Test
+    fun `interceptComposeGradlePlugin false leaves org_jetbrains_compose resolving normally`(
+        @TempDir projectDir: File
+    ) {
+        writeComposePluginConsumer(
+            projectDir,
+            requestedVersion = "9.9.9",
+            composeTvosConfig = """
+                manifestUrl.set("")
+                interceptComposeGradlePlugin.set(false)
+            """.trimIndent()
+        )
+
+        val result = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("help", "--console=plain")
+            .buildAndFail()
+
+        assertFalse(
+            result.output.contains("dev.sajidali.compose"),
+            "opt-out must never mention the fork coordinate; the failure must be against " +
+                "normal (portal/Central) org.jetbrains.compose resolution instead; got:\n${result.output}"
+        )
+    }
+
+    @Test
+    fun `composeGradlePluginVersion extension override wins over the requested version`(
+        @TempDir projectDir: File
+    ) {
+        writeComposePluginConsumer(
+            projectDir,
+            requestedVersion = "9.9.9",
+            composeTvosConfig = """
+                manifestUrl.set("")
+                composeGradlePluginVersion.set("8.8.8")
+            """.trimIndent()
+        )
+
+        val result = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("help", "--console=plain")
+            .buildAndFail()
+
+        assertTrue(
+            result.output.contains("dev.sajidali.compose:compose-gradle-plugin:8.8.8"),
+            "extension override must win over the requested plugin version (9.9.9); got:\n${result.output}"
+        )
+    }
+
+    @Test
+    fun `manifest gradlePlugin field wins over the requested version when no extension override is set`(
+        @TempDir projectDir: File
+    ) {
+        val manifest = """{"schema": 2, "mappings": {}, "gradlePlugin": "7.7.7"}"""
+        withManifestServer(manifest) { manifestUrl, hits ->
+            writeComposePluginConsumer(
+                projectDir,
+                requestedVersion = "9.9.9",
+                composeTvosConfig = """manifestUrl.set("$manifestUrl")"""
+            )
+
+            val result = GradleRunner.create()
+                .withProjectDir(projectDir)
+                .withTestKitDir(testKitDir)
+                .withArguments("help", "--console=plain")
+                .buildAndFail()
+
+            assertTrue(
+                result.output.contains("dev.sajidali.compose:compose-gradle-plugin:7.7.7"),
+                "manifest gradlePlugin field must win over the requested version (9.9.9) when " +
+                    "no extension override is set; got:\n${result.output}"
+            )
+            assertTrue(hits.get() >= 1, "the consumer build must have fetched the manifest from the local server")
+        }
+    }
+
+    @Test
+    fun `a real artifact published at the substituted coordinate is actually fetched by Gradle`(
+        @TempDir projectDir: File,
+        @TempDir fakeRepoDir: File
+    ) {
+        // A REAL (but deliberately non-functional) jar at the exact substituted coordinate:
+        // Gradle's plugin resolution reads META-INF/gradle-plugins/org.jetbrains.compose.properties
+        // out of whatever jar useModule pointed it at, then tries to load the class named
+        // there. Pointing it at a class that doesn't exist means the build still fails --
+        // but at CLASS LOADING, strictly later than artifact/module resolution, proving the
+        // real jar bytes were actually fetched over a real (file://) repository lookup rather
+        // than merely asserting on the constructed coordinate string.
+        val fakeVersion = "9.9.9-fake"
+        writeFakeGradlePluginArtifact(
+            repoDir = fakeRepoDir,
+            group = "dev.sajidali.compose",
+            artifact = "compose-gradle-plugin",
+            version = fakeVersion,
+            markerPluginId = "org.jetbrains.compose",
+            implementationClass = "does.not.Exist"
+        )
+        writeComposePluginConsumer(
+            projectDir,
+            requestedVersion = fakeVersion,
+            extraPluginRepositoryUrl = fakeRepoDir.toURI().toString()
+        )
+
+        val result = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("help", "--console=plain")
+            .buildAndFail()
+
+        assertFalse(
+            result.output.contains("Could not find dev.sajidali.compose:compose-gradle-plugin"),
+            "a REAL artifact published at the substituted coordinate must resolve -- the " +
+                "failure must move past artifact/module resolution; got:\n${result.output}"
+        )
+        assertTrue(
+            result.output.contains("does.not.Exist"),
+            "must fail while loading the (deliberately missing) implementation class named in " +
+                "the real jar's marker properties file, proving that file was actually read " +
+                "from a genuinely-fetched artifact; got:\n${result.output}"
+        )
+    }
+
+    // -- consumer project scaffolding ----------------------------------------------------
+
+    private fun writeComposePluginConsumer(
+        projectDir: File,
+        requestedVersion: String,
+        composeTvosConfig: String = """manifestUrl.set("")""",
+        extraPluginRepositoryUrl: String? = null
+    ) {
+        projectDir.resolve("settings.gradle.kts").writeText(
+            """
+            pluginManagement {
+                repositories {
+                    maven { url = uri("${pluginRepo.toURI()}") }
+                    ${if (extraPluginRepositoryUrl != null) """maven { url = uri("$extraPluginRepositoryUrl") }""" else ""}
+                    gradlePluginPortal()
+                    mavenCentral()
+                }
+            }
+
+            plugins {
+                id("dev.sajidali.compose-tvos") version "$pluginVersion"
+            }
+
+            composeTvos {
+                verbose.set(true)
+                ${composeTvosConfig.prependIndent("                ").trimStart()}
+            }
+
+            rootProject.name = "compose-plugin-consumer"
+            """.trimIndent()
+        )
+
+        projectDir.resolve("build.gradle.kts").writeText(
+            """
+            plugins {
+                id("org.jetbrains.compose") version "$requestedVersion"
+            }
+            """.trimIndent()
+        )
+
+        projectDir.resolve("gradle.properties").writeText("org.gradle.jvmargs=-Xmx1g")
+    }
+
+    /**
+     * Writes a REAL (resolvable) but deliberately non-functional Gradle plugin jar: a POM
+     * plus a jar containing only `META-INF/gradle-plugins/<markerPluginId>.properties`
+     * (pointing at a class that doesn't exist) -- no compiled `Plugin<Project>` class. See
+     * this class's KDoc for why a fully-functional fake plugin isn't needed.
+     */
+    private fun writeFakeGradlePluginArtifact(
+        repoDir: File,
+        group: String,
+        artifact: String,
+        version: String,
+        markerPluginId: String,
+        implementationClass: String
+    ) {
+        val moduleDir = File(repoDir, "${group.replace('.', '/')}/$artifact/$version").apply { mkdirs() }
+        moduleDir.resolve("$artifact-$version.pom").writeText(
+            """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+                <modelVersion>4.0.0</modelVersion>
+                <groupId>$group</groupId>
+                <artifactId>$artifact</artifactId>
+                <version>$version</version>
+                <packaging>jar</packaging>
+            </project>
+            """.trimIndent()
+        )
+        val jarFile = moduleDir.resolve("$artifact-$version.jar")
+        java.util.zip.ZipOutputStream(jarFile.outputStream()).use { zos ->
+            zos.putNextEntry(java.util.zip.ZipEntry("META-INF/gradle-plugins/$markerPluginId.properties"))
+            zos.write("implementation-class=$implementationClass\n".toByteArray())
+            zos.closeEntry()
+        }
+    }
+
+    companion object {
+        private val pluginRepo = File(requireNotNull(System.getProperty("functionalTest.pluginRepo")))
+        private val pluginVersion = requireNotNull(System.getProperty("functionalTest.pluginVersion"))
+        private val testKitDir = File(requireNotNull(System.getProperty("functionalTest.testKitDir")))
+    }
+}
+
+/**
  * Direct tests for [VersionManifestLoader.load] against a local JDK [HttpServer]:
  * fetch, TTL caching, forced refresh, stale-cache fallback and the no-cache failure path.
  *
