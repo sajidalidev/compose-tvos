@@ -855,4 +855,25 @@ class VersionManifestLoaderTest {
         assertNull(manifest!!.gradlePlugin)
         assertEquals(1, manifest.mappings.size)
     }
+
+    @Test
+    fun `parseManifest accepts an unrecognized schema 3 manifest, documenting the current accept-anything behavior`() {
+        // `schema` is purely informational and never validated (see VersionManifestLoader's
+        // KDoc): any integer, including ones ahead of what this loader was written against,
+        // still parses fine as long as the fields it actually reads (`mappings`,
+        // `gradlePlugin`) are present in a recognized shape.
+        val json = """
+        {
+          "schema": 3,
+          "mappings": {"org.jetbrains.compose.material3:1.10.*": "1.10.0-alpha05"},
+          "gradlePlugin": "1.13.0"
+        }
+        """.trimIndent()
+
+        val manifest = VersionManifestLoader.parseManifest(json, null)
+        assertNotNull(manifest)
+        assertEquals(3, manifest!!.schema)
+        assertEquals("1.13.0", manifest.gradlePlugin)
+        assertEquals(1, manifest.mappings.size)
+    }
 }

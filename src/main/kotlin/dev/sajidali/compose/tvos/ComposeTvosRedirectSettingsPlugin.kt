@@ -82,15 +82,36 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         // Repositories the substituted module above resolves from. Opt-out
         // (interceptComposeGradlePlugin=false) is a `Property` read lazily inside the
         // eachPlugin callback, so it is NOT knowable here at apply() time -- pragmatically,
-        // these are always appended. That is harmless: they are pure additions (never
-        // removals/reordering) placed AFTER whatever the consumer's settings script already
-        // declared (including any gradlePluginPortal() call, which is left untouched and
-        // still resolves ordinary, non-intercepted plugin markers exactly as before), so
-        // Gradle tries the consumer's own repositories first and only falls through to
-        // these for coordinates the consumer's repositories don't have -- e.g. our
-        // substituted dev.sajidali.compose:compose-gradle-plugin. Gradle also dedups
-        // repositories by URL, so a consumer who already declares mavenCentral()/
-        // mavenLocal() themselves gets no duplicate entry.
+        // mavenCentral()/mavenLocal() are always appended. That is harmless: they are pure
+        // additions (never removals/reordering) placed AFTER whatever the consumer's settings
+        // script already declared (including any gradlePluginPortal() call, which is left
+        // untouched and still resolves ordinary, non-intercepted plugin markers exactly as
+        // before), so Gradle tries the consumer's own repositories first and only falls
+        // through to these for coordinates the consumer's repositories don't have -- e.g. our
+        // substituted dev.sajidali.compose:compose-gradle-plugin. Repositories are NOT
+        // deduplicated by URL, so a consumer who already declares mavenCentral()/mavenLocal()
+        // themselves gets a harmless, redundant second entry rather than a merge.
+        //
+        // Critical fix (Task 9b review): Gradle's OWN plugin resolution machinery falls back
+        // to gradlePluginPortal() only when `pluginManagement.repositories` is still EMPTY at
+        // the point a plugin needs resolving (verified against Gradle 9.5's
+        // DefaultPluginArtifactRepositories). A consumer following the README -- a bare
+        // `plugins { id("dev.sajidali.compose-tvos") version "x.x.x" }`, with no
+        // `pluginManagement.repositories` block of their own -- has an EMPTY handler right up
+        // until this line runs. Appending mavenCentral()/mavenLocal() unconditionally would
+        // make that handler non-empty, silently disabling Gradle's implicit portal fallback
+        // for every OTHER, unrelated plugin the consumer's build later requests (e.g. any
+        // portal-hosted plugin id in a project build script) -- breaking their build with a
+        // "Searched in the following repositories: MavenRepo, MavenLocal" failure that never
+        // mentions the portal. So: if the handler is empty right now, add
+        // gradlePluginPortal() FIRST, preserving Gradle's default resolution behavior, before
+        // adding our own two repositories. If it is non-empty, the consumer declared
+        // repositories deliberately (taking ownership of plugin resolution themselves), and we
+        // must not second-guess that by injecting the portal behind their back -- only our two
+        // repositories are appended, exactly as before.
+        if (settings.pluginManagement.repositories.isEmpty()) {
+            settings.pluginManagement.repositories.gradlePluginPortal()
+        }
         settings.pluginManagement.repositories.apply {
             mavenCentral()
             mavenLocal()

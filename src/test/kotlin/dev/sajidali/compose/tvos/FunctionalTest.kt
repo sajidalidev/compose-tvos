@@ -898,6 +898,176 @@ class ComposePluginInterceptionFunctionalTest {
 }
 
 /**
+ * Task 9b review fix: `pluginManagement.repositories` gradlePluginPortal() fallback preservation.
+ *
+ * What this proves: Gradle's own plugin resolution machinery only falls back to
+ * `gradlePluginPortal()` when `settings.pluginManagement.repositories` is still EMPTY at the
+ * point a plugin needs resolving. Before this fix, the settings plugin's `apply()`
+ * unconditionally appended `mavenCentral()`/`mavenLocal()` to that handler -- turning an
+ * initially-empty handler non-empty and silently disabling the portal fallback for every
+ * OTHER, unrelated plugin the consumer's build later requests.
+ *
+ * Reproducing the exact README scenario (a bare `plugins { id("dev.sajidali.compose-tvos")
+ * version "x.x.x" }` with NO `pluginManagement.repositories` block at all) is not directly
+ * possible in this harness: our own plugin-under-test is only published to the local
+ * `functionalTestRepo` (never the real Gradle Plugin Portal), and `GradleRunner.
+ * withPluginClasspath()` does not inject into settings scripts (see the functional-test
+ * wiring comment in build.gradle.kts) -- so declaring `pluginManagement.repositories` with at
+ * least our own plugin's coordinate is otherwise unavoidable, which makes the handler
+ * non-empty before our `apply()` ever runs and would mask this exact defect again.
+ *
+ * Instead, the consumer's `pluginManagement` block resolves our plugin-under-test via
+ * `includeBuild(...)` against a tiny generated included build (below) that depends on the
+ * already-published `functionalTestRepo` artifact and re-exposes it as a Gradle plugin --
+ * `includeBuild` participates in plugin resolution WITHOUT ever touching
+ * `pluginManagement.repositories`, so that handler is genuinely, verifiably empty the moment
+ * our settings plugin's `apply()` runs, exactly matching the real README scenario's observable
+ * state at that point, even though the resolution mechanism differs (`includeBuild` vs. the
+ * real Gradle Plugin Portal). The consumer's build script then requests a second, unrelated,
+ * nonexistent plugin id that can only ever be found (if at all) via the portal; the assertion
+ * is on the FAILURE MESSAGE of that second request naming "Gradle Central Plugin Repository"
+ * among the searched sources -- proof the portal fallback is still wired up after our own
+ * repositories were appended.
+ */
+class PluginPortalFallbackFunctionalTest {
+
+    @Test
+    fun `an unrelated portal-hosted plugin request still consults the Gradle Plugin Portal when the consumer declared no pluginManagement repositories`(
+        @TempDir projectDir: File,
+        @TempDir includeBuildDir: File
+    ) {
+        writeIncludeBuildPluginProject(includeBuildDir)
+        writeEmptyRepositoriesConsumer(projectDir, includeBuildDir)
+
+        val result = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("help", "--console=plain")
+            .buildAndFail()
+
+        assertTrue(
+            result.output.contains(UNRESOLVABLE_PLUGIN_ID),
+            "the build must fail while trying to resolve the unrelated, nonexistent plugin " +
+                "request; got:\n${result.output}"
+        )
+        assertTrue(
+            result.output.contains("Gradle Central Plugin Repository"),
+            "with pluginManagement.repositories empty at our apply() time, the Gradle Plugin " +
+                "Portal fallback must still be consulted for this later, unrelated plugin " +
+                "request -- before the fix, our unconditional mavenCentral()/mavenLocal() " +
+                "append made the handler non-empty and silently dropped the portal from the " +
+                "search, so this failure would only ever mention MavenRepo/MavenLocal; " +
+                "got:\n${result.output}"
+        )
+    }
+
+    // -- consumer / included-build plugin-under-test scaffolding -------------------------
+
+    private fun writeIncludeBuildPluginProject(dir: File) {
+        dir.resolve("settings.gradle.kts").writeText(
+            """
+            rootProject.name = "compose-tvos-plugin-includebuild"
+            """.trimIndent()
+        )
+        // `java-gradle-plugin`'s jar validation requires the implementation class to be
+        // physically present INSIDE the produced jar -- a plain `dependencies { implementation
+        // ... }` reference to the already-published functionalTestRepo artifact is NOT enough:
+        // Gradle instead falls back to trying to resolve that dependency coordinate itself as a
+        // *plugin marker* through the ordinary pluginManagement.repositories/portal route,
+        // defeating the whole point of this included build. So the plugin's already-compiled
+        // classes are unpacked straight out of the already-published jar into
+        // `src/main/resources`, which `java-gradle-plugin` bundles as-is, no recompilation
+        // needed; only its two real runtime dependencies (kotlin-stdlib, kotlinx-serialization-
+        // json) are declared normally, resolved from mavenCentral() -- this project's OWN
+        // top-level `repositories {}` block, entirely unrelated to the consuming settings
+        // script's `pluginManagement.repositories`.
+        val resourcesDir = File(dir, "src/main/resources").apply { mkdirs() }
+        val pluginJar = File(pluginRepo, "dev/sajidali/compose-tvos/$pluginVersion/compose-tvos-$pluginVersion.jar")
+        java.util.zip.ZipFile(pluginJar).use { zip ->
+            zip.entries().asSequence()
+                .filterNot { it.isDirectory || it.name.startsWith("META-INF/gradle-plugins/") }
+                .forEach { entry ->
+                    val outFile = File(resourcesDir, entry.name)
+                    outFile.parentFile.mkdirs()
+                    zip.getInputStream(entry).use { input -> outFile.outputStream().use { input.copyTo(it) } }
+                }
+        }
+
+        dir.resolve("build.gradle.kts").writeText(
+            """
+            plugins {
+                `java-gradle-plugin`
+            }
+
+            repositories {
+                mavenCentral()
+            }
+
+            dependencies {
+                implementation("org.jetbrains.kotlin:kotlin-stdlib:$KOTLIN_VERSION")
+                implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:$KOTLINX_SERIALIZATION_VERSION")
+            }
+
+            gradlePlugin {
+                plugins {
+                    create("composeTvosSettings") {
+                        id = "dev.sajidali.compose-tvos"
+                        implementationClass = "dev.sajidali.compose.tvos.ComposeTvosRedirectSettingsPlugin"
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+    }
+
+    private fun writeEmptyRepositoriesConsumer(projectDir: File, includeBuildDir: File) {
+        // Deliberately no `repositories {}` block anywhere inside `pluginManagement`: this is
+        // the README scenario, and `settings.pluginManagement.repositories` is genuinely empty
+        // right up until our settings plugin's `apply()` runs.
+        projectDir.resolve("settings.gradle.kts").writeText(
+            """
+            pluginManagement {
+                includeBuild("${includeBuildDir.absolutePath}")
+            }
+
+            plugins {
+                id("dev.sajidali.compose-tvos")
+            }
+
+            composeTvos {
+                manifestUrl.set("")
+            }
+
+            rootProject.name = "empty-plugin-management-repositories-consumer"
+            """.trimIndent()
+        )
+
+        // A second, unrelated plugin request that exists nowhere -- neither the included
+        // build nor any real repository -- so its failure is purely about which SOURCES got
+        // searched, never about our own substituted org.jetbrains.compose coordinate.
+        projectDir.resolve("build.gradle.kts").writeText(
+            """
+            plugins {
+                id("$UNRESOLVABLE_PLUGIN_ID") version "0.0.1-does-not-exist"
+            }
+            """.trimIndent()
+        )
+
+        projectDir.resolve("gradle.properties").writeText("org.gradle.jvmargs=-Xmx1g")
+    }
+
+    companion object {
+        private const val UNRESOLVABLE_PLUGIN_ID = "dev.sajidali.compose.tvos.test.portal.fallback.nonexistent"
+        private const val KOTLIN_VERSION = "2.0.21"
+        private const val KOTLINX_SERIALIZATION_VERSION = "1.7.3"
+
+        private val pluginRepo = File(requireNotNull(System.getProperty("functionalTest.pluginRepo")))
+        private val pluginVersion = requireNotNull(System.getProperty("functionalTest.pluginVersion"))
+        private val testKitDir = File(requireNotNull(System.getProperty("functionalTest.testKitDir")))
+    }
+}
+
+/**
  * Direct tests for [VersionManifestLoader.load] against a local JDK [HttpServer]:
  * fetch, TTL caching, forced refresh, stale-cache fallback and the no-cache failure path.
  *
