@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Compose tvOS Demo</string>
+    <string name="counter_label">Button clicked %1$d times</string>
+</resources>
