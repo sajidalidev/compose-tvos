@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [1.1.0] - Unreleased
+## [1.1.0] - 2026-07-06
 
 ### Added
 - GradleTestKit functional test suite covering end-to-end plugin behavior.
