@@ -86,6 +86,22 @@ you declare that block, Gradle stops adding the Portal implicitly, so keep both
 `gradlePluginPortal()` and `mavenCentral()` in it. Do not pin version `1.0.0`: it predates the
 published artifact ecosystem and configures nothing (upgrade to `1.1.0`).
 
+## Migrating from a pre-plugin "shadow" repository
+
+If your project previously obtained tvOS Compose by publishing patched `org.jetbrains.*`
+artifacts into `mavenLocal()` or a vendored/local Maven directory (the "shadow" approach used
+before this plugin existed), **remove those `org/jetbrains/**` entries before adopting the
+plugin** (keep any third-party artifacts, e.g. your own koin/coil tvOS builds — only the
+Compose shadow must go).
+
+Why: the plugin deliberately prefers official artifacts whenever they already provide a tvOS
+variant ("official-first"). It cannot distinguish a genuine upstream tvOS publish from your own
+older shadow publish sitting in a repository you declared — so the stale shadow wins, no
+injection happens for those modules, and your dependency graph silently mixes two Compose
+lineages. The typical symptom is not a resolution error but a **link-time failure** with
+duplicate IR symbols (e.g. `IrPropertySymbolImpl is already bound`) once modules from both
+lineages meet in one binary.
+
 ## Artifacts not found
 
 Ensure your repositories include Maven Central (and, for the very latest fork publishes ahead of
