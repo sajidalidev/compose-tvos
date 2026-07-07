@@ -49,25 +49,27 @@ Phases 1–4 of the production-hardening effort are complete on this branch (9+ 
   (`scripts/audit-tvos-closure.py`), and a full, clean (`exit 0`, zero FAIL/UNKNOWN) publish of
   every covered group, including `material3.adaptive` and `window-core`, into `mavenLocal`.
 
-## Near-term (before Central publication / v1.1.0 tag)
+## Shipped: Maven Central publication (2026-07-06/07)
 
-**Central Portal publication checklist** (all currently blocked on user-provided credentials —
-PGP signing key + Central Portal token — see `task-11-prep-report.md` for the exact ordered
-command sequence):
-1. Smoke-test Central Portal bundle validation early with the smallest library (`savedstate`).
-2. Staged, signed, local file://-repo publish of all 8 fork libraries (dry-run script:
-   `scripts/stage-central-bundle.sh` in `compose-multiplatform-core`) → validate bundle layout →
-   upload.
-3. Publish in dependency order: core fork libraries → `components-resources` →
-   `compose-gradle-plugin` → the `dev.sajidali.compose-tvos` plugin v1.1.0 itself (existing
-   vanniktech + plugin-publish setup).
-4. Push the live manifest update (this repo's `manifest/compose-tvos-versions.json`) to
-   `sajidalidev/compose-tvos`'s `main` branch.
-5. Clean-machine verification from public repositories only (fresh `GRADLE_USER_HOME`, empty
-   `~/.m2`, no `mavenLocal`) — the real version of the dry-run check done in this branch's
-   `task-11-prep-report.md`.
+The entire ecosystem is published under `dev.sajidali.*` on Maven Central and verified from
+public repositories on a clean machine: core fork libraries, `components-resources`,
+`compose-gradle-plugin`, the `dev.sajidali.compose-tvos` plugin v1.1.0 (with its plugin
+marker), and — as of 2026-07-07 — the `material3.adaptive` family plus `window-core`. The
+live version manifest is served from this repo's `main` branch. A demo app was run on an
+Apple TV simulator with Compose resources rendering (see the docs site's app-embedding page).
 
-**CI (D11, currently unimplemented)**:
+## Near-term
+
+- **Gradle Plugin Portal listing**: v1.1.0 submitted; pending Gradle's one-time namespace
+  approval (DNS TXT ownership proof for `sajidali.dev` is in place). Until approved, consumers
+  add `mavenCentral()` to `pluginManagement.repositories` (the documented quickstart).
+- **Release cadence policy**: publish one fork line per Compose *stable* release; map
+  intermediate requested versions onto it via the remote manifest. Rationale: Central Portal
+  monthly publishing quotas (a full core publish is roughly one month's budget) — a quota
+  increase request to Sonatype is worth filing regardless.
+- Merge `tvos-publishing` → `tvos-main` in both fork repos.
+
+**CI (workflows authored, go live with the repo's `main` branch)**:
 - Plugin repo `.github/workflows/ci.yml`: ubuntu (build + unit + functional tests + manifest
   JSON-schema validation), macos (demo E2E against Central — doubles as an upstream-regression
   canary).
