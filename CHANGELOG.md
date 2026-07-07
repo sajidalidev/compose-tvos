@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+- Ecosystem: the `dev.sajidali` fork now publishes `compose.material3.adaptive` (`adaptive`,
+  `adaptive-layout`, `adaptive-navigation`, `adaptive-navigation3`, `1.3.0-beta02`),
+  `material3-adaptive-navigation-suite` (`1.5.0-alpha22`), and `androidx.window:window-core`
+  (`1.6.0-alpha02`, now built with a real tvOS Kotlin/Native target). No plugin code change was
+  needed — the same-version convention covers `adaptive`, and `window-core` is picked up
+  transitively via the fork's own module metadata.
+
 ## [1.1.0] - 2026-07-06
 
 ### Added

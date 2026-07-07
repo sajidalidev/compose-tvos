@@ -91,13 +91,11 @@ whenever a tvOS Kotlin target requests them:
 - `org.jetbrains.compose.components`
 - `org.jetbrains.compose.annotation-internal`
 - `org.jetbrains.compose.collection-internal`
-- `org.jetbrains.compose.material3.adaptive` — **covered by the plugin's redirect logic, but not
-  currently published by the fork.** Upstream `androidx.window:window-core` (a transitive
-  dependency of `material3-adaptive`) ships no Kotlin/Native target at all, so the fork excludes
-  `material3-adaptive`/`material3-adaptive-navigation-suite` from this release rather than
-  porting around that gap. A project requesting `material3-adaptive` on tvOS gets the normal
-  "no tvOS variant found" warning/`strictMode` failure, not a silent success. Revisit once
-  upstream ships a tvOS target for `androidx.window:window-core`.
+- `org.jetbrains.compose.material3.adaptive` (`adaptive`, `adaptive-layout`, `adaptive-navigation`,
+  `adaptive-navigation3`) and `material3-adaptive-navigation-suite` — published by the fork,
+  including `androidx.window:window-core`, which the fork now builds a real tvOS
+  Kotlin/Native target for. No extra configuration needed: the same-version convention covers
+  `adaptive`, and `window-core` arrives transitively through the fork's own module metadata.
 - `org.jetbrains.androidx.navigation` (including the `navigation-compose` artifact)
 - `org.jetbrains.androidx.lifecycle` (including `lifecycle-viewmodel-compose`)
 - `org.jetbrains.androidx.savedstate` (including `savedstate-compose`)
@@ -124,7 +122,9 @@ with tvOS `klib`s added. Versions currently published (verify against the manife
 | `androidx.navigationevent.*` (`navigationevent-compose`) | `1.1.1` |
 | `androidx.savedstate.*` (incl. `savedstate-compose`) | `1.5.0-alpha01` |
 | `compose-gradle-plugin` (the `org.jetbrains.compose` fork used by plugin-marker interception) | `1.12.0-beta01` |
-| `compose.material3.adaptive` / `material3-adaptive-navigation-suite` | not published (see above) |
+| `compose.material3.adaptive` (`adaptive`, `adaptive-layout`, `adaptive-navigation`, `adaptive-navigation3`) | `1.3.0-beta02` |
+| `material3-adaptive-navigation-suite` | `1.5.0-alpha22` |
+| `androidx.window.window-core` (transitive dependency of `material3.adaptive`) | `1.6.0-alpha02` |
 
 ## Requirements
 
@@ -191,6 +191,40 @@ as a composite build (`includeBuild("..")`) so it always tracks the branch under
 rather than a published coordinate — see the comments at the top of `demo/settings.gradle.kts`
 for how a real consumer's setup differs (a plain version-pinned `plugins {}` block, no
 `includeBuild`).
+
+## Running on tvOS (app embedding)
+
+Building your KMP module produces a Kotlin framework per tvOS target (e.g.
+`:linkDebugFrameworkTvosSimulatorArm64` → `<module>.framework`), which exposes your
+`UIViewController`-returning entry point (e.g. `ComposeUIViewController { App() }`) to Swift/
+Objective-C. A static framework (`isStatic = true`) links directly into the app executable with
+no separate embedding step; a dynamic framework needs the usual `Frameworks/` embedding.
+
+**Compose Resources bundle layout.** Gradle assembles resources per target under
+`build/generated/compose/resourceGenerator/assembledResources/<target>Main/composeResources/`
+(camelCase, no hyphen), and the tvOS resource reader looks for them at runtime nested one level
+*inside* a hyphenated `compose-resources/` wrapper directory at the app bundle root — the
+assembled `composeResources/` tree itself is copied in as-is, not renamed and not flattened. For
+example, an app bundled as `Demo.app` with a `demo.generated.resources` package must end up with:
+
+```
+Demo.app/compose-resources/composeResources/demo.generated.resources/drawable/logo.xml
+Demo.app/compose-resources/composeResources/demo.generated.resources/values/strings.commonMain.cvr
+```
+
+i.e. copy the assembled `composeResources/` directory as-is *into* a `compose-resources/`
+directory you create at the bundle root:
+
+```bash
+mkdir -p Demo.app/compose-resources
+cp -R build/generated/compose/resourceGenerator/assembledResources/tvosSimulatorArm64Main/composeResources \
+      Demo.app/compose-resources/
+```
+
+This nesting is easy to get wrong and isn't obvious from the assembled directory name alone.
+Hand-assembled bundles (e.g. CI smoke tests or tooling that builds a `.app` without an Xcode
+project) must replicate this layout explicitly; a naive copy/rename produces a black screen or
+a missing-resource exception.
 
 ## Troubleshooting
 

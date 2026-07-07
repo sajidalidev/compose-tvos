@@ -17,8 +17,13 @@ Phases 1–4 of the production-hardening effort are complete on this branch (9+ 
   candidate-version noise).
 - **Redirect coverage expanded from 8 to 15 groups**: `ui`, `foundation`, `runtime`, `material`,
   `material3`, `animation`, `components`, `annotation-internal`, `collection-internal`,
-  `material3.adaptive` (covered by logic, not yet published — see Later), `navigation`,
-  `lifecycle`, `savedstate`, `navigationevent`, `navigation3`.
+  `material3.adaptive`, `navigation`, `lifecycle`, `savedstate`, `navigationevent`, `navigation3`.
+- **`material3.adaptive` now published**: the fork builds a real tvOS Kotlin/Native target for
+  `androidx.window:window-core` and republishes it alongside `adaptive`/`adaptive-layout`/
+  `adaptive-navigation`/`adaptive-navigation3`/`material3-adaptive-navigation-suite` — the
+  previous window-core gap is closed, no manifest mapping or consumer-side config needed
+  (same-version convention; `window-core` arrives transitively through the fork's own module
+  metadata).
 - **Official-first resolution**: both the metadata-rule injection path and the project-level
   dependency-substitution path check whether the *official* JetBrains artifact already ships a
   genuine tvOS `klib` before ever introducing a `dev.sajidali` coordinate — this is what unblocked
@@ -42,7 +47,7 @@ Phases 1–4 of the production-hardening effort are complete on this branch (9+ 
 - Fork repo (`compose-multiplatform-core`, branch `tvos-publishing`): the coordinate-root rewrite,
   the `compose.platforms` build wiring, closure-audit script
   (`scripts/audit-tvos-closure.py`), and a full, clean (`exit 0`, zero FAIL/UNKNOWN) publish of
-  every covered group except `material3.adaptive` into `mavenLocal`.
+  every covered group, including `material3.adaptive` and `window-core`, into `mavenLocal`.
 
 ## Near-term (before Central publication / v1.1.0 tag)
 
@@ -111,8 +116,3 @@ never-published-for-tvOS `org.jetbrains.compose.ui:ui-tvosarm64`. This is real e
 work (reaching out to library maintainers, a documented publish-time integration guide) and is
 explicitly out of scope until this plugin's consumer-side story is fully shipped and stable on
 Central.
-
-**`material3.adaptive` on tvOS**: blocked entirely on upstream `androidx.window:window-core`
-shipping a Kotlin/Native target. No workaround (stubbing/vendoring `window-core`) is planned for
-now — revisit if/when upstream adds tvOS (or any Kotlin/Native target) support, or if adaptive
-layouts on tvOS become a frequently-requested gap.
