@@ -1,0 +1,19 @@
+title: compose-tvos
+description: >-
+  tvOS (tvosArm64/tvosSimulatorArm64) support for JetBrains Compose Multiplatform,
+  added with a single Gradle settings-plugin line.
+url: "https://sajidalidev.github.io"
+baseurl: "/compose-tvos"
+
+theme: minima
+
+show_excerpts: false
+
+header_pages:
+  - how-it-works.md
+  - supported-versions.md
+  - app-embedding.md
+  - library-authors.md
+  - troubleshooting.md
+
+markdown: kramdown

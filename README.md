@@ -3,6 +3,8 @@
 A Gradle settings plugin that adds tvOS (`tvosArm64`/`tvosSimulatorArm64`) support to JetBrains
 Compose Multiplatform projects, without JetBrains's own artifacts needing to support tvOS yet.
 
+Full documentation: https://sajidalidev.github.io/compose-tvos/
+
 ## Quickstart
 
 ```kotlin
