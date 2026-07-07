@@ -76,15 +76,15 @@ The one target that remains unsupported is `tvosX64` (the legacy Intel tvOS simu
 fork does not build it, and this plugin does not redirect it. Use `tvosSimulatorArm64` for
 simulator builds instead.
 
-## Gradle Plugin Portal publication is pending
+## Plugin does not resolve
 
-The plugin is currently resolvable via Maven Central. Publication to the Gradle Plugin Portal
-(where `plugins { id(...) version ... }` resolves by default when you declare no
-`pluginManagement.repositories` of your own) is still pending. In the meantime, declare an
-explicit `pluginManagement` block with `mavenCentral()` in your `settings.gradle.kts` (see the
-[quickstart](index.md#quickstart)) — once the Portal publish lands, this plugin will also
-resolve from Gradle Plugin Portal directly, and the explicit `mavenCentral()` entry can be kept
-or dropped as you prefer.
+Version 1.1.0+ resolves from the
+[Gradle Plugin Portal](https://plugins.gradle.org/plugin/dev.sajidali.compose-tvos) with no
+`pluginManagement` configuration (it is also on Maven Central). If resolution fails, check for
+a `pluginManagement.repositories` block of your own that omits `gradlePluginPortal()` — once
+you declare that block, Gradle stops adding the Portal implicitly, so keep both
+`gradlePluginPortal()` and `mavenCentral()` in it. Do not pin version `1.0.0`: it predates the
+published artifact ecosystem and configures nothing (upgrade to `1.1.0`).
 
 ## Artifacts not found
 

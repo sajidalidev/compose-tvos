@@ -24,23 +24,16 @@ tvOS yet.
 
 ```kotlin
 // settings.gradle.kts
-pluginManagement {
-    repositories {
-        mavenCentral()
-        gradlePluginPortal()
-    }
-}
-
 plugins {
     id("dev.sajidali.compose-tvos") version "1.1.0"
 }
 ```
 
-`mavenCentral()` is listed ahead of `gradlePluginPortal()` in `pluginManagement.repositories`
-because the plugin marker is currently resolved from Maven Central while Gradle Plugin Portal
-publication is pending — see [Troubleshooting](troubleshooting.md) for details. Gradle's default
-`pluginManagement.repositories` (when you declare none of your own) already tries Gradle Plugin
-Portal first, so an explicit block like the one above is what makes resolution work today.
+That is the entire required setup: the plugin resolves from the
+[Gradle Plugin Portal](https://plugins.gradle.org/plugin/dev.sajidali.compose-tvos), and once
+applied it takes care of the rest (including adding `mavenCentral()` to plugin resolution for
+the tvOS-patched Compose Gradle plugin it substitutes). If your build declares its own
+`pluginManagement.repositories` block, keep `gradlePluginPortal()` and `mavenCentral()` in it.
 
 That's it — no other settings are required. Add `tvosArm64()`/`tvosSimulatorArm64()` targets to
 your Kotlin Multiplatform module as you normally would:

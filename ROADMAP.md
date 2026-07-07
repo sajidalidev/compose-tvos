@@ -60,9 +60,9 @@ Apple TV simulator with Compose resources rendering (see the docs site's app-emb
 
 ## Near-term
 
-- **Gradle Plugin Portal listing**: v1.1.0 submitted; pending Gradle's one-time namespace
-  approval (DNS TXT ownership proof for `sajidali.dev` is in place). Until approved, consumers
-  add `mavenCentral()` to `pluginManagement.repositories` (the documented quickstart).
+- ~~**Gradle Plugin Portal listing**~~ — approved and live (2026-07-07):
+  https://plugins.gradle.org/plugin/dev.sajidali.compose-tvos — the quickstart is now a single
+  `plugins {}` line with zero `pluginManagement` configuration.
 - **Release cadence policy**: publish one fork line per Compose *stable* release; map
   intermediate requested versions onto it via the remote manifest. Rationale: Central Portal
   monthly publishing quotas (a full core publish is roughly one month's budget) — a quota
