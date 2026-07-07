@@ -308,6 +308,54 @@ class TvosVariantDiscoveryTest {
         assertFalse(variants.any { it.nativeTarget == "tvos_simulator_arm64" })
     }
 
+    // -- Task 11 (dangling-metadata fix): available-at group/version capture -------------
+
+    @Test
+    fun `parseModuleMetadata captures the available-at group and version verbatim`() {
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64ApiElements",
+              "attributes": { "org.jetbrains.kotlin.native.target": "tvos_arm64" },
+              "available-at": {
+                "group": "org.jetbrains.androidx.lifecycle",
+                "module": "lifecycle-viewmodel-compose-tvosarm64",
+                "version": "2.11.0-beta01"
+              }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "lifecycle-viewmodel-compose")
+        assertEquals(1, variants.size)
+        val variant = variants[0]
+        assertEquals("lifecycle-viewmodel-compose-tvosarm64", variant.artifactId)
+        assertEquals("org.jetbrains.androidx.lifecycle", variant.availableAtGroup)
+        assertEquals("2.11.0-beta01", variant.availableAtVersion)
+    }
+
+    @Test
+    fun `parseModuleMetadata leaves available-at group and version null for an inline variant`() {
+        val json = """
+        {
+          "variants": [
+            {
+              "name": "tvosArm64ApiElements",
+              "attributes": { "org.jetbrains.kotlin.native.target": "tvos_arm64" }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val variants = TvosVariantDiscovery.parseModuleMetadata(json, baseArtifactId = "runtime")
+        assertEquals(1, variants.size)
+        val variant = variants[0]
+        assertNull(variant.availableAtGroup)
+        assertNull(variant.availableAtVersion)
+    }
+
     // -- Task 10b (Phase 4 blocker fix): already-supported native-target extraction ------
 
     @Test
@@ -632,6 +680,134 @@ class TvosVariantDiscoveryDiskCacheTest {
             cacheDir = cacheDir
         )
         assertEquals(1, retried.size, "a retry after a previous fetch failure must still succeed (no stale cached-empty result)")
+    }
+}
+
+/**
+ * Task 11 (dangling-metadata fix): direct unit tests for
+ * [TvosVariantDiscovery.targetModuleExists]'s caching and confirmed-404-vs-network-failure
+ * distinction -- mirrors the [TvosVariantDiscoveryDiskCacheTest] pattern above for
+ * [TvosVariantDiscovery.discoverVariants]'s own `FetchOutcome`-based caching.
+ */
+class TvosVariantDiscoveryExistenceProbeTest {
+
+    @Test
+    fun `targetModuleExists returns true when the module is found on a repository`(@TempDir tempDir: File) {
+        TvosVariantDiscovery.clearCache()
+
+        val groupId = "dev.sajidali.compose.existstest"
+        val artifactId = "existstest-tvosarm64"
+        val version = "1.0.0-exists-test"
+
+        val repoDir = File(tempDir, "repo")
+        val moduleFile = File(repoDir, "${groupId.replace('.', '/')}/$artifactId/$version/$artifactId-$version.module")
+        moduleFile.parentFile.mkdirs()
+        moduleFile.writeText("""{"variants": []}""")
+
+        val exists = TvosVariantDiscovery.targetModuleExists(
+            repositoryUrls = listOf(repoDir.toURI().toString()),
+            groupId = groupId,
+            artifactId = artifactId,
+            version = version,
+            cacheDir = File(tempDir, "cache")
+        )
+
+        assertTrue(exists, "a genuinely published module must be confirmed to exist")
+    }
+
+    @Test
+    fun `targetModuleExists returns false and caches confirmed absence when every repository 404s`(@TempDir tempDir: File) {
+        TvosVariantDiscovery.clearCache()
+
+        val groupId = "dev.sajidali.compose.absenttest"
+        val artifactId = "absenttest-tvosarm64"
+        val version = "1.0.0-absent-test"
+        val cacheDir = File(tempDir, "cache")
+
+        val hits = AtomicInteger()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            hits.incrementAndGet()
+            exchange.sendResponseHeaders(404, -1)
+            exchange.close()
+        }
+        server.start()
+        try {
+            val first = TvosVariantDiscovery.targetModuleExists(
+                repositoryUrls = listOf("http://127.0.0.1:${server.address.port}"),
+                groupId = groupId,
+                artifactId = artifactId,
+                version = version,
+                cacheDir = cacheDir
+            )
+            assertFalse(first, "a confirmed 404 on every repository must report the module as absent")
+            assertEquals(1, hits.get())
+
+            // Second call must be served from the (in-memory) cache, no further network hit.
+            val second = TvosVariantDiscovery.targetModuleExists(
+                repositoryUrls = listOf("http://127.0.0.1:${server.address.port}"),
+                groupId = groupId,
+                artifactId = artifactId,
+                version = version,
+                cacheDir = cacheDir
+            )
+            assertFalse(second)
+            assertEquals(1, hits.get(), "a confirmed-absent result must be cached, not re-probed")
+
+            // Force the disk-read path: clear the in-memory cache and shut the server down --
+            // a re-probe attempt would fail loudly rather than silently succeeding.
+            TvosVariantDiscovery.clearCache()
+            server.stop(0)
+            val third = TvosVariantDiscovery.targetModuleExists(
+                repositoryUrls = listOf("http://127.0.0.1:${server.address.port}"),
+                groupId = groupId,
+                artifactId = artifactId,
+                version = version,
+                cacheDir = cacheDir
+            )
+            assertFalse(third, "the confirmed-absent result must also be cached to disk and re-readable")
+        } finally {
+            try { server.stop(0) } catch (_: Exception) { }
+        }
+    }
+
+    @Test
+    fun `targetModuleExists treats a non-404 failure as unknown, falls back to true, and never caches it`(
+        @TempDir tempDir: File
+    ) {
+        TvosVariantDiscovery.clearCache()
+
+        val groupId = "dev.sajidali.compose.unknowntest"
+        val artifactId = "unknowntest-tvosarm64"
+        val version = "1.0.0-unknown-test"
+        val cacheDir = File(tempDir, "cache")
+
+        val hits = AtomicInteger()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            hits.incrementAndGet()
+            exchange.sendResponseHeaders(500, -1)
+            exchange.close()
+        }
+        server.start()
+        try {
+            val result = TvosVariantDiscovery.targetModuleExists(
+                repositoryUrls = listOf("http://127.0.0.1:${server.address.port}"),
+                groupId = groupId,
+                artifactId = artifactId,
+                version = version,
+                cacheDir = cacheDir
+            )
+            assertTrue(result, "an inconclusive (non-404) failure must fall back to 'supported', distinct from a confirmed 404")
+            assertEquals(1, hits.get())
+
+            val cacheKey = "$groupId:$artifactId:$version"
+            val safeKey = cacheKey.replace(":", "_").replace(".", "_")
+            val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.exists")
+            assertFalse(cacheFile.exists(), "an inconclusive probe outcome must never be written to the disk cache")
+        } finally {
+            server.stop(0)
+        }
     }
 }
 
@@ -1154,6 +1330,50 @@ class ComposeTvosRedirectPluginIsOfficiallySupportedTest {
         assertFalse(supported)
         val snapshot = TvosDiagnosticsBookkeeping.diagnosticsSnapshot()
         assertEquals(emptyList(), snapshot.skippedAlreadySupported, "nothing must be recorded when the official artifact is not already supported")
+    }
+
+    // -- Task 11 (dangling-metadata fix) --------------------------------------------------
+
+    @Test
+    fun `isOfficiallySupported returns false when the official available-at target module is confirmed dangling`(
+        @TempDir tempDir: File
+    ) {
+        // Reproduces the confirmed real-world shape (task-11-report.md): the official umbrella
+        // advertises a tvOS variant via available-at, but the target module it points at was
+        // never actually published anywhere -- dangling metadata that must NOT be trusted at
+        // face value.
+        val groupId = "org.jetbrains.compose.subtest3"
+        val baseModule = "subtest3"
+        val version = "1.0.0-subtest-dangling"
+
+        val repoDir = File(tempDir, "repo")
+        val moduleFile = File(repoDir, "${groupId.replace('.', '/')}/$baseModule/$version/$baseModule-$version.module")
+        moduleFile.parentFile.mkdirs()
+        moduleFile.writeText(
+            """
+            {
+              "variants": [
+                {
+                  "name": "tvosArm64ApiElements",
+                  "attributes": { "org.jetbrains.kotlin.native.target": "tvos_arm64" },
+                  "available-at": { "group": "$groupId", "module": "$baseModule-tvosarm64", "version": "$version" }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+        // Deliberately NO "$baseModule-tvosarm64" module published anywhere -- the advertised
+        // available-at target dangles.
+
+        val supported = ComposeTvosRedirectPlugin().isOfficiallySupported(
+            groupId, "$baseModule-tvosarm64", version, configFor(tempDir, repoDir.toURI().toString()), logger
+        )
+
+        assertFalse(supported, "a confirmed-dangling available-at target must not count as officially supported")
+        assertEquals(
+            emptyList(), TvosDiagnosticsBookkeeping.diagnosticsSnapshot().skippedAlreadySupported,
+            "nothing must be recorded as a skip once the advertised target is confirmed dangling"
+        )
     }
 
     @Test

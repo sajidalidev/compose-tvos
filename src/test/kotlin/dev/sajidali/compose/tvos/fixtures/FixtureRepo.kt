@@ -65,19 +65,47 @@ class FixtureRepo(val rootDir: File) {
         version: String,
         targets: List<FixtureNativeTarget>
     ) {
-        val umbrellaVariants = buildJsonArray {
-            add(metadataApiElementsVariant("$artifact-$version.jar"))
-            targets.forEach { target ->
-                val platformModule = "$artifact-${target.moduleSuffix}"
-                add(availableAtVariant("${target.variantPrefix}ApiElements-published", apiAttributes(target), group, platformModule, version))
-                add(availableAtVariant("${target.variantPrefix}MetadataElements-published", metadataAttributes(target), group, platformModule, version))
-                add(availableAtVariant("${target.variantPrefix}SourcesElements-published", sourcesAttributes(target), group, platformModule, version))
-            }
-        }
-        writeModule(group, artifact, version, umbrellaVariants)
+        writeModule(group, artifact, version, umbrellaVariants(group, artifact, version, targets))
         writeArtifactFile(group, artifact, version, "$artifact-$version.jar")
 
         targets.forEach { target -> publishPlatformModule(group, artifact, version, target) }
+    }
+
+    /**
+     * Task 11 (dangling-metadata fix): publishes an umbrella `.module` whose `available-at`
+     * variants advertise target platform modules that are NEVER ACTUALLY PUBLISHED --
+     * reproducing genuinely dangling upstream metadata (the confirmed real-world case,
+     * task-11-report.md: `org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0-beta01`'s
+     * umbrella `.module` on Maven Central advertises `tvosArm64`/`tvosSimulatorArm64` variants
+     * whose `available-at` target 404s on every repository).
+     *
+     * Unlike [publishUmbrellaWithPlatforms], [publishPlatformModule] is deliberately never
+     * called for any of [targets] here -- the advertised redirect targets simply do not exist
+     * anywhere in the fixture repo.
+     */
+    fun publishUmbrellaWithDanglingPlatforms(
+        group: String,
+        artifact: String,
+        version: String,
+        targets: List<FixtureNativeTarget>
+    ) {
+        writeModule(group, artifact, version, umbrellaVariants(group, artifact, version, targets))
+        writeArtifactFile(group, artifact, version, "$artifact-$version.jar")
+    }
+
+    private fun umbrellaVariants(
+        group: String,
+        artifact: String,
+        version: String,
+        targets: List<FixtureNativeTarget>
+    ): JsonArray = buildJsonArray {
+        add(metadataApiElementsVariant("$artifact-$version.jar"))
+        targets.forEach { target ->
+            val platformModule = "$artifact-${target.moduleSuffix}"
+            add(availableAtVariant("${target.variantPrefix}ApiElements-published", apiAttributes(target), group, platformModule, version))
+            add(availableAtVariant("${target.variantPrefix}MetadataElements-published", metadataAttributes(target), group, platformModule, version))
+            add(availableAtVariant("${target.variantPrefix}SourcesElements-published", sourcesAttributes(target), group, platformModule, version))
+        }
     }
 
     /** Publishes a platform module (e.g. `ui-tvosarm64`) with dummy klib/jar artifacts. */

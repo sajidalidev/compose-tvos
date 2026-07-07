@@ -687,6 +687,77 @@ class ComposeTvosFunctionalTest {
         )
     }
 
+    // -- Task 11 (dangling-metadata fix): upstream available-at redirects that don't exist --
+
+    @Test
+    fun `an official umbrella whose available-at target modules do not exist resolves via the fork`(
+        @TempDir projectDir: File
+    ) {
+        // Reproduces the confirmed tivitime live defect (task-11-report.md): upstream
+        // metadata advertises a tvOS available-at variant whose target platform module was
+        // never actually published (dangling), while the fork DOES publish a genuine twin at
+        // the same coordinate. Before the Task 11 fix, the official-first mechanism trusted
+        // the dangling advertisement at face value and skipped injection, so resolution failed
+        // on the phantom org.jetbrains coordinate exactly like the real tivitime failure.
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.runtime:runtime:$DANGLING_VERSION")
+
+        val result = runResolve(projectDir, target = "tvosArm64")
+
+        val resolved = result.resolvedLines()
+        val artifacts = result.artifactLines()
+        val umbrella = resolved.single { it.contains("org.jetbrains.compose.runtime:runtime:$DANGLING_VERSION ") }
+        assertContains(
+            umbrella, "-injected",
+            message = "umbrella must resolve through an injected variant once the official " +
+                "advertisement's target is confirmed dangling; got: $umbrella"
+        )
+        assertTrue(
+            resolved.any { it.contains("dev.sajidali.compose.runtime:runtime-tvosarm64:$DANGLING_VERSION") },
+            "graph must resolve through the fork platform module once the official target is " +
+                "confirmed dangling; got:\n${resolved.joinToString("\n")}"
+        )
+        assertTrue(
+            artifacts.any {
+                it.contains("dev.sajidali.compose.runtime:runtime-tvosarm64:$DANGLING_VERSION") &&
+                    it.contains("runtime-tvosarm64-$DANGLING_VERSION.klib")
+            },
+            "artifacts must come from the fork platform module; got:\n${artifacts.joinToString("\n")}"
+        )
+        assertFalse(
+            (resolved + artifacts).any { it.contains("org.jetbrains.compose.runtime:runtime-tvosarm64") },
+            "the dangling official platform module coordinate must never appear in a successful " +
+                "resolution; got:\n${(resolved + artifacts).joinToString("\n")}"
+        )
+        assertTrue(
+            result.output.contains("Official metadata advertises") && result.output.contains("but artifact missing"),
+            "verbose output must record the dangling-metadata detection; got:\n${result.output}"
+        )
+    }
+
+    @Test
+    fun `a direct dependency on a dangling-metadata tvOS-suffixed coordinate is substituted to the fork`(
+        @TempDir projectDir: File
+    ) {
+        // Substitution-side counterpart of the rule-side test above: a consumer requesting the
+        // tvOS-suffixed platform module coordinate directly must be substituted to the fork
+        // once its official available-at target is confirmed dangling, mirroring the
+        // "officially-supported" test's opposite (non-dangling) case elsewhere in this class.
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.runtime:runtime-tvosarm64:$DANGLING_VERSION")
+
+        val result = runResolve(projectDir, target = "tvosArm64")
+
+        val resolved = result.resolvedLines()
+        assertTrue(
+            resolved.any { it.contains("dev.sajidali.compose.runtime:runtime-tvosarm64:$DANGLING_VERSION") },
+            "a direct dependency on a tvOS-suffixed coordinate whose official target is " +
+                "confirmed dangling must be substituted to the fork; got:\n${resolved.joinToString("\n")}"
+        )
+        assertFalse(
+            resolved.any { it.contains("org.jetbrains.compose.runtime:runtime-tvosarm64") },
+            "the original org.jetbrains coordinate must no longer appear once substituted; got:\n${resolved.joinToString("\n")}"
+        )
+    }
+
     // -- consumer project scaffolding ----------------------------------------------------
 
     private fun writeConsumerProject(
@@ -849,6 +920,23 @@ class ComposeTvosFunctionalTest {
         private const val RUNTIME_NO_FORK_VERSION = "1.13.0-beta01"
 
         /**
+         * Task 11 (dangling-metadata fix): a version at which the OFFICIAL umbrella advertises
+         * a tvOS variant via `available-at`, but the target platform module that redirect
+         * points at is NEVER ACTUALLY PUBLISHED anywhere in the fixture repo -- reproducing the
+         * confirmed tivitime live defect (task-11-report.md): JetBrains' real
+         * `lifecycle-viewmodel-compose:2.11.0-beta01` umbrella on Maven Central advertises
+         * `tvosArm64`/`tvosSimulatorArm64` variants whose `available-at` target 404s on both
+         * Central and the JetBrains dev repo. The fork DOES publish a genuine, working twin at
+         * this same version (see [publishUmbrellaWithDanglingPlatforms] usage below) -- the
+         * whole point of the fix is that resolution must fall through to it instead of failing
+         * on the phantom org.jetbrains coordinate. Distinct from [RUNTIME_VERSION] (official
+         * target genuinely exists) and [RUNTIME_NO_FORK_VERSION] (official has no available-at
+         * redirect at all for the fork-less case) -- this is the third, previously-unhandled
+         * shape: official ADVERTISES a redirect, but it points nowhere.
+         */
+        private const val DANGLING_VERSION = "2.11.0-beta01-dangling-test"
+
+        /**
          * Task 10d (Phase 4 closeout): an OLD, upstream-only (no dev.sajidali fork counterpart)
          * version of `org.jetbrains.compose.ui:ui`, numerically lower than [COMPOSE_VERSION] so
          * Gradle's own conflict resolution reliably picks [COMPOSE_VERSION] as the winner when
@@ -954,6 +1042,22 @@ class ComposeTvosFunctionalTest {
                 // official-already-covers-it shape.
                 publishUmbrellaWithPlatforms(
                     "org.jetbrains.compose.runtime", "runtime", RUNTIME_NO_FORK_VERSION,
+                    listOf(FixtureNativeTarget.TVOS_ARM64)
+                )
+                // Task 11: official umbrella that ADVERTISES a tvosArm64 available-at variant,
+                // but the target platform module it redirects to is never actually published
+                // anywhere -- dangling metadata. Deliberately uses publishUmbrellaWithDanglingPlatforms
+                // (not publishUmbrellaWithPlatforms) so no "runtime-tvosarm64" module exists at
+                // DANGLING_VERSION under org.jetbrains.compose.runtime.
+                publishUmbrellaWithDanglingPlatforms(
+                    "org.jetbrains.compose.runtime", "runtime", DANGLING_VERSION,
+                    listOf(FixtureNativeTarget.TVOS_ARM64)
+                )
+                // Fork twin: a genuine, fully-working umbrella + platform module at the same
+                // version -- this is what resolution must fall through to once the official
+                // advertisement above is confirmed dangling.
+                publishUmbrellaWithPlatforms(
+                    "dev.sajidali.compose.runtime", "runtime", DANGLING_VERSION,
                     listOf(FixtureNativeTarget.TVOS_ARM64)
                 )
             }

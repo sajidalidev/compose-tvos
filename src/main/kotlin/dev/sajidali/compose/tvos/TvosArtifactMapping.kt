@@ -22,13 +22,25 @@ import java.util.concurrent.ConcurrentHashMap
  * transformer can match it for all source-set compile paths (api, metadata, runtime,
  * sources) — not just the api request. Empty map means the cache pre-dates this field
  * and a degraded-but-functional default set is used at injection time.
+ * @param availableAtGroup Task 11 (dangling-metadata fix): the `available-at` object's own
+ * `group` field, when this variant is a redirect rather than an inline variant the umbrella
+ * carries itself. `null` for an inline variant (no `available-at` at all) -- deliberately
+ * NOT assumed to equal the umbrella's own group, even though that happens to hold for the
+ * confirmed real-world dangling case; captured verbatim from whatever the metadata says.
+ * `null` also for cache entries predating this field.
+ * @param availableAtVersion The `available-at` object's own `version` field, same caveats as
+ * [availableAtGroup]. Together with [availableAtGroup] and [artifactId] (which already carries
+ * the `available-at` `module` field when present), this is enough to probe whether the
+ * advertised redirect target genuinely exists -- see [TvosVariantDiscovery.verifyOfficialSupport].
  */
 @Serializable
 data class TvosVariant(
     val variantName: String,
     val nativeTarget: String,
     val artifactId: String,
-    val attributes: Map<String, String> = emptyMap()
+    val attributes: Map<String, String> = emptyMap(),
+    val availableAtGroup: String? = null,
+    val availableAtVersion: String? = null
 )
 
 /**
@@ -51,6 +63,11 @@ object TvosTargets {
  */
 object TvosVariantDiscovery {
     private val variantCache = ConcurrentHashMap<String, List<TvosVariant>>()
+
+    // Task 11 (dangling-metadata fix): memoizes targetModuleExists's per-coordinate answer,
+    // exactly parallel to variantCache above -- a distinct map since an existence probe answers
+    // a different question (does the .module file exist at all?) than a parsed variant list.
+    private val existenceCache = ConcurrentHashMap<String, Boolean>()
     // v3: cache entries are now serialized as JSON (List<TvosVariant> via kotlinx-serialization)
     // instead of the bespoke pipe/comma-delimited format. Old v1/v2 caches are ignored
     // rather than migrated — a single cold network fetch repopulates v3.
@@ -283,14 +300,20 @@ object TvosVariantDiscovery {
                 // model where attribute values are always compared/stored as strings here.
                 val attributes = attributesObject.mapValues { (_, value) -> value.jsonPrimitive.content }
 
-                val moduleArtifactId = variantObject["available-at"]?.jsonObject
-                    ?.get("module")?.jsonPrimitive?.content
+                val availableAtObject = variantObject["available-at"]?.jsonObject
+                val moduleArtifactId = availableAtObject?.get("module")?.jsonPrimitive?.content
+                // Task 11: capture the available-at redirect's own group/version verbatim --
+                // both null when this is an inline variant (no available-at at all).
+                val availableAtGroup = availableAtObject?.get("group")?.jsonPrimitive?.content
+                val availableAtVersion = availableAtObject?.get("version")?.jsonPrimitive?.content
                 val targetSuffix = nativeTarget.replace("_", "")
                 val artifactId = moduleArtifactId
                     ?: baseArtifactId?.let { "$it-$targetSuffix" }
                     ?: targetSuffix
 
-                variants.add(TvosVariant(variantName, nativeTarget, artifactId, attributes))
+                variants.add(
+                    TvosVariant(variantName, nativeTarget, artifactId, attributes, availableAtGroup, availableAtVersion)
+                )
             } catch (e: Exception) {
                 logger?.info("[ComposeTvosRedirect] Skipping malformed variant entry: ${e.message}")
             }
@@ -336,6 +359,7 @@ object TvosVariantDiscovery {
 
     fun clearCache() {
         variantCache.clear()
+        existenceCache.clear()
     }
 
     /**
@@ -366,9 +390,290 @@ object TvosVariantDiscovery {
      * pre-check [TvosVariantInjectionRule] performs before injecting (Task 10b), applied to the
      * separate `dependencySubstitution.all` mechanism that has its own, independent blind spot.
      */
-    fun isNativeTargetOfficiallySupported(variants: List<TvosVariant>, tvosSuffix: String): Boolean {
+    fun isNativeTargetOfficiallySupported(variants: List<TvosVariant>, tvosSuffix: String): Boolean =
+        isNativeTargetInSet(alreadySupportedNativeTargets(variants), tvosSuffix)
+
+    /**
+     * Task 11: the same suffix-vs-native-target comparison [isNativeTargetOfficiallySupported]
+     * does, but against an already-computed set of native targets (e.g. the existence-verified
+     * set [verifyOfficialSupport] returns) rather than re-deriving an unverified one from a raw
+     * variant list. Factored out so callers that already ran the existence check don't have to
+     * re-derive [alreadySupportedNativeTargets] (which would silently drop the verification).
+     */
+    fun isNativeTargetInSet(nativeTargets: Set<String>, tvosSuffix: String): Boolean {
         val normalizedSuffix = tvosSuffix.removePrefix("-").lowercase()
-        return alreadySupportedNativeTargets(variants).any { it.replace("_", "").lowercase() == normalizedSuffix }
+        return nativeTargets.any { it.replace("_", "").lowercase() == normalizedSuffix }
+    }
+
+    /**
+     * Task 11 (dangling-metadata fix) result: which native targets among an OFFICIAL umbrella's
+     * discovered tvOS [TvosVariant]s are genuinely officially supported once their advertised
+     * `available-at` redirect target has been existence-verified, and which advertise a target
+     * module confirmed NOT to exist anywhere ("dangling metadata" -- see [targetModuleExists]).
+     */
+    data class OfficialSupportResult(
+        val supportedNativeTargets: Set<String>,
+        val danglingNativeTargets: Set<String>
+    )
+
+    /**
+     * Task 11 (dangling-metadata fix): like [alreadySupportedNativeTargets], but does not
+     * simply trust that an OFFICIAL umbrella's advertised `available-at` variant is real. For
+     * every variant that redirects to a target module (as opposed to an INLINE variant the
+     * umbrella carries itself, i.e. no `available-at` at all), the target module's existence is
+     * verified via [targetModuleExists] before its native target counts as officially supported.
+     *
+     * This exists precisely because upstream JetBrains metadata can genuinely dangle: the
+     * confirmed real-world case (task-11-report.md) is
+     * `org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0-beta01`'s umbrella
+     * `.module` on Maven Central, which advertises `tvosArm64`/`tvosSimulatorArm64` variants
+     * whose `available-at` target (e.g. `lifecycle-viewmodel-compose-tvosarm64`) 404s on every
+     * configured repository. Trusting that advertisement at face value made the pre-1.1.1
+     * official-first mechanism skip injection/substitution for a target the official artifact
+     * does not actually ship, so consumer resolution failed outright on the phantom coordinate
+     * instead of falling through to the fork, which genuinely publishes it.
+     *
+     * An inline variant (no `available-at`) counts as supported by definition -- there is no
+     * separate target module whose existence could even be probed; the umbrella itself already
+     * carries the real artifact.
+     *
+     * Fallback semantics -- deliberately ASYMMETRIC with [TvosVariantInjectionRule]'s own
+     * empty-fork-discovery fallback (which injects EVERYTHING discovered when the OFFICIAL
+     * fetch itself failed/came back empty):
+     *  - An existence probe FAILURE (network error, distinct from a confirmed 404/absent --
+     *    see [targetModuleExists]'s `Unknown` outcome) treats the target as SUPPORTED. This
+     *    preserves pre-1.1.1 behavior: a transient network outage must not flip an otherwise
+     *    healthy official resolution over to the fork.
+     *  - Only a confirmed 404/absent on EVERY configured repository flips a target to NOT
+     *    supported, so injection/substitution proceeds for it.
+     * The two fallbacks point in opposite directions because they guard against opposite failure
+     * modes. The empty-fork-discovery fallback exists to avoid silently leaving a genuine tvOS
+     * gap unfilled -- a wrongly-SKIPPED injection breaks tvOS builds outright there, since
+     * nothing else will ever provide that variant. Here, the opposite mistake is the one to
+     * avoid: a wrongly-added injection/substitution would override an official resolution Gradle
+     * would otherwise already have handled correctly, merely because a repository hiccuped
+     * during the one extra probe this fix adds -- comparatively low-stakes, since the official
+     * artifact was never actually confirmed broken.
+     */
+    fun verifyOfficialSupport(
+        variants: List<TvosVariant>,
+        repositoryUrls: List<String>,
+        cacheDir: File?,
+        logger: Logger? = null,
+        offline: Boolean = false
+    ): OfficialSupportResult {
+        val supported = mutableSetOf<String>()
+        val dangling = mutableSetOf<String>()
+        for (variant in variants) {
+            val availableAtGroup = variant.availableAtGroup
+            val availableAtVersion = variant.availableAtVersion
+            if (availableAtGroup == null || availableAtVersion == null) {
+                supported.add(variant.nativeTarget)
+                continue
+            }
+            val exists = targetModuleExists(
+                repositoryUrls, availableAtGroup, variant.artifactId, availableAtVersion, cacheDir, logger, offline
+            )
+            if (exists) {
+                supported.add(variant.nativeTarget)
+            } else {
+                dangling.add(variant.nativeTarget)
+                logger?.lifecycle(
+                    "[ComposeTvosRedirect] Official metadata advertises " +
+                        "$availableAtGroup:${variant.artifactId}:$availableAtVersion but artifact missing -- " +
+                        "treating as unsupported, fork will serve"
+                )
+            }
+        }
+        return OfficialSupportResult(supported, dangling)
+    }
+
+    /**
+     * Task 11: does `groupId:artifactId:version`'s `.module` file -- the OFFICIAL umbrella's
+     * `available-at` TARGET, not the umbrella itself -- actually exist on any configured
+     * repository? Shares the exact repository-URL list, memory+disk caching (SNAPSHOT versions
+     * excluded from the disk cache, same as [discoverVariants]), and offline semantics as the
+     * rest of this object: an existence result is exactly as cacheable as a parsed variant list,
+     * since it is likewise a genuine, repository-confirmed answer -- not a guess.
+     *
+     * Returns `true` (treated as existing/supported) when: the module was confirmed to exist on
+     * some configured repository, OR every probe attempt was inconclusive (a network error or
+     * other non-404 failure -- see [ProbeOutcome.Unknown] -- rather than a genuine miss), OR
+     * offline with nothing already cached (mirrors [discoverVariants]'s own offline degrade).
+     * Returns `false` ONLY when every configured repository gave a confirmed 404/absent answer.
+     * See [verifyOfficialSupport]'s KDoc for why this fallback direction is deliberately the
+     * opposite of the empty-fork-discovery fallback elsewhere in this plugin.
+     */
+    fun targetModuleExists(
+        repositoryUrls: List<String>,
+        groupId: String,
+        artifactId: String,
+        version: String,
+        cacheDir: File?,
+        logger: Logger? = null,
+        offline: Boolean = false
+    ): Boolean {
+        val cacheKey = "$groupId:$artifactId:$version"
+
+        existenceCache[cacheKey]?.let { return it }
+
+        if (!version.contains("SNAPSHOT") && cacheDir != null) {
+            readExistenceFromFileCache(cacheDir, cacheKey)?.let {
+                existenceCache[cacheKey] = it
+                return it
+            }
+        }
+
+        if (offline) {
+            logger?.info("[ComposeTvosRedirect] Offline: no cached existence probe for $cacheKey; assuming supported")
+            return true
+        }
+
+        // Mirrors discoverVariants's own repository-list looping, but existence needs a
+        // different aggregation: a confirmed 404 on one repository does not end the search
+        // (another mirror might still have it), whereas ANY confirmed existence ends it
+        // immediately, and any inconclusive (network-error) probe must not be allowed to freeze
+        // a false "confirmed absent" verdict into the cache.
+        var sawUnknown = false
+        for (repoUrl in repositoryUrls) {
+            when (probeModuleExists(repoUrl, groupId, artifactId, version, logger)) {
+                ProbeOutcome.Exists -> {
+                    cacheExistence(cacheDir, cacheKey, true, version)
+                    return true
+                }
+                ProbeOutcome.ConfirmedAbsent -> { /* keep checking remaining repositories */ }
+                ProbeOutcome.Unknown -> sawUnknown = true
+            }
+        }
+
+        if (sawUnknown) {
+            // At least one repository could not give a definitive answer: never cache this
+            // (mirrors FetchOutcome.Failure never being cached) so a transient outage remains
+            // retryable, and fall back to "supported" per this function's documented contract.
+            return true
+        }
+
+        // Every configured repository gave a confirmed 404/absent answer.
+        cacheExistence(cacheDir, cacheKey, false, version)
+        return false
+    }
+
+    private fun cacheExistence(cacheDir: File?, cacheKey: String, exists: Boolean, version: String) {
+        existenceCache[cacheKey] = exists
+        if (!version.contains("SNAPSHOT") && cacheDir != null) {
+            writeExistenceToFileCache(cacheDir, cacheKey, exists)
+        }
+    }
+
+    /**
+     * Per-repository existence-probe outcome. Distinct from [FetchOutcome]: existence only
+     * needs the HTTP/file-presence answer, not a successful variant parse, and specifically
+     * distinguishes a confirmed 404/missing-file ([ConfirmedAbsent]) from every other failure
+     * mode ([Unknown]: network error, timeout, exhausted redirect, or any other non-200/404
+     * status) -- a distinction [FetchOutcome.Failure] deliberately does not make, since nothing
+     * upstream of this fix ever needed it.
+     */
+    private sealed class ProbeOutcome {
+        data object Exists : ProbeOutcome()
+        data object ConfirmedAbsent : ProbeOutcome()
+        data object Unknown : ProbeOutcome()
+    }
+
+    private fun probeModuleExists(
+        repositoryUrl: String,
+        groupId: String,
+        artifactId: String,
+        version: String,
+        logger: Logger?
+    ): ProbeOutcome {
+        val baseUrl = repositoryUrl.trimEnd('/')
+        val groupPath = groupId.replace('.', '/')
+        val modulePath = "$groupPath/$artifactId/$version/$artifactId-$version.module"
+
+        return try {
+            if (baseUrl.startsWith("file:")) {
+                probeFileUrl(baseUrl, modulePath)
+            } else {
+                probeHttpUrl("$baseUrl/$modulePath")
+            }
+        } catch (e: Exception) {
+            logger?.info("[ComposeTvosRedirect] Existence probe failed for $groupId:$artifactId:$version: ${e.message}")
+            ProbeOutcome.Unknown
+        }
+    }
+
+    private fun probeFileUrl(baseUrl: String, modulePath: String): ProbeOutcome {
+        val basePath = baseUrl.removePrefix("file:").trimStart('/')
+        val absolutePath = if (baseUrl.startsWith("file:///") || baseUrl.startsWith("file:/") && !baseUrl.startsWith("file://")) {
+            "/$basePath"
+        } else {
+            basePath
+        }
+        val moduleFile = File(absolutePath, modulePath)
+        return if (moduleFile.exists() && moduleFile.isFile) ProbeOutcome.Exists else ProbeOutcome.ConfirmedAbsent
+    }
+
+    private fun probeHttpUrl(moduleUrl: String): ProbeOutcome {
+        var currentUrl = moduleUrl
+        var hops = 0
+        while (true) {
+            val connection = URL(currentUrl).openConnection() as HttpURLConnection
+            connection.connectTimeout = 5_000
+            connection.readTimeout = 5_000
+            connection.requestMethod = "GET"
+            connection.instanceFollowRedirects = false
+
+            val responseCode = connection.responseCode
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                connection.inputStream.close()
+                return ProbeOutcome.Exists
+            }
+            if (responseCode == HttpURLConnection.HTTP_NOT_FOUND) {
+                return ProbeOutcome.ConfirmedAbsent
+            }
+
+            val isRedirect = responseCode == HttpURLConnection.HTTP_MOVED_PERM ||
+                responseCode == HttpURLConnection.HTTP_MOVED_TEMP ||
+                responseCode == HttpURLConnection.HTTP_SEE_OTHER ||
+                responseCode == 307 || responseCode == 308
+            if (!isRedirect || hops >= MAX_REDIRECTS) {
+                // Any other non-200/404 terminal status (5xx, or a redirect with no more hops
+                // left) is ambiguous, not a confirmed absence.
+                return ProbeOutcome.Unknown
+            }
+
+            val location = connection.getHeaderField("Location") ?: return ProbeOutcome.Unknown
+            currentUrl = URL(URL(currentUrl), location).toString()
+            hops++
+        }
+    }
+
+    private fun readExistenceFromFileCache(cacheDir: File, cacheKey: String): Boolean? {
+        val cacheFile = getExistenceCacheFile(cacheDir, cacheKey)
+        if (!cacheFile.exists()) return null
+
+        return try {
+            when (cacheFile.readText().trim()) {
+                "true" -> true
+                "false" -> false
+                else -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun writeExistenceToFileCache(cacheDir: File, cacheKey: String, exists: Boolean) {
+        val cacheFile = getExistenceCacheFile(cacheDir, cacheKey)
+        try {
+            cacheFile.parentFile?.mkdirs()
+            cacheFile.writeText(exists.toString())
+        } catch (_: Exception) { }
+    }
+
+    private fun getExistenceCacheFile(cacheDir: File, cacheKey: String): File {
+        val safeKey = cacheKey.replace(":", "_").replace(".", "_")
+        return File(cacheDir, "$CACHE_DIR_NAME/$safeKey.exists")
     }
 }
 

@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-07
+
 ### Added
 - Ecosystem: the `dev.sajidali` fork now publishes `compose.material3.adaptive` (`adaptive`,
   `adaptive-layout`, `adaptive-navigation`, `adaptive-navigation3`, `1.3.0-beta02`),
@@ -11,6 +13,17 @@ All notable changes to this project are documented in this file.
   (`1.6.0-alpha02`, now built with a real tvOS Kotlin/Native target). No plugin code change was
   needed — the same-version convention covers `adaptive`, and `window-core` is picked up
   transitively via the fork's own module metadata.
+
+### Fixed
+- Official-first now verifies advertised platform artifacts exist; dangling upstream metadata
+  (e.g. `org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0-beta01`'s tvOS
+  variants on Maven Central, whose advertised platform module 404s on every repository) no
+  longer breaks resolution — the fork serves those targets instead. Previously, both
+  official-first mechanisms (the metadata-rule variant injection and the project-level
+  dependency substitution) trusted an official umbrella's advertised `available-at` tvOS
+  variant at face value; if the target module it pointed at didn't actually exist, injection and
+  substitution were both skipped and resolution failed on the phantom coordinate instead of
+  falling through to the fork.
 
 ## [1.1.0] - 2026-07-06
 

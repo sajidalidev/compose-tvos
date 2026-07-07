@@ -229,6 +229,13 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
      *
      * This is the exemplar "official-first" success path referenced by [TvosDiagnosticsBookkeeping]'s
      * class KDoc guard-rail -- any future one must record here too.
+     *
+     * Task 11 (dangling-metadata fix): `supported` is now decided against the
+     * existence-VERIFIED target set ([TvosVariantDiscovery.verifyOfficialSupport]), not the raw
+     * `alreadySupportedNativeTargets` extraction -- an official variant whose `available-at`
+     * redirect target is confirmed missing on every configured repository no longer counts as
+     * officially supported here, so a direct dependency on that tvOS-suffixed coordinate is
+     * substituted to the fork instead of resolving (and failing) against the phantom coordinate.
      */
     internal fun isOfficiallySupported(
         groupId: String,
@@ -248,8 +255,11 @@ class ComposeTvosRedirectPlugin : Plugin<Project> {
             logger = if (config.verbose) logger else null,
             offline = config.offline
         )
-        val alreadySupportedTargets = TvosVariantDiscovery.alreadySupportedNativeTargets(officialVariants)
-        val supported = TvosVariantDiscovery.isNativeTargetOfficiallySupported(officialVariants, suffix)
+        val alreadySupportedTargets = TvosVariantDiscovery.verifyOfficialSupport(
+            officialVariants, config.repositoryUrls, File(config.cacheDirPath),
+            if (config.verbose) logger else null, config.offline
+        ).supportedNativeTargets
+        val supported = TvosVariantDiscovery.isNativeTargetInSet(alreadySupportedTargets, suffix)
         if (supported) {
             val sourceModule = "$groupId:$baseModuleName:$version"
             TvosDiagnosticsBookkeeping.recordSkippedAlreadySupported(

@@ -146,8 +146,32 @@ abstract class TvosVariantInjectionRule @Inject constructor(
         // disk, see getVariants's own KDoc), so it costs a genuine network/disk round trip only
         // the FIRST time a given official coordinate is seen, not per-component-metadata-rule
         // invocation.
+        //
+        // Task 11 (dangling-metadata fix): an official variant's advertised availability is no
+        // longer trusted at face value -- verifyOfficialSupport additionally probes each
+        // available-at redirect target's existence (one extra cached probe per distinct
+        // available-at module, see its own KDoc) before counting a native target as officially
+        // supported, so upstream metadata that advertises a tvOS variant whose target module
+        // was never actually published no longer causes this rule to skip injection for it.
         val officialVariants = getVariants(group, moduleName, id.version)
-        val alreadySupportedTargets = TvosVariantDiscovery.alreadySupportedNativeTargets(officialVariants)
+        val supportResult = TvosVariantDiscovery.verifyOfficialSupport(
+            officialVariants, params.repositoryUrls, File(params.cacheDirPath),
+            if (params.verbose) logger else null, params.offline
+        )
+        val alreadySupportedTargets = supportResult.supportedNativeTargets
+
+        // Task 11 follow-up: a dangling official variant is still present, UNMODIFIED, in this
+        // component's own metadata -- merely excluding its native target from
+        // alreadySupportedTargets (so injectable below includes it) reproduces the exact
+        // "cannot choose between ..." variant-ambiguity Gradle error Task 10b's whole pre-check
+        // exists to avoid, since our injected variant would carry an IDENTICAL, mirrored
+        // attribute set. See poisonDanglingOfficialVariants's own KDoc for why de-tuning the
+        // dangling variant's own attributes -- rather than removing it (no public API for that)
+        // or overriding its available-at target (also no public API for that) -- is how this is
+        // resolved.
+        if (supportResult.danglingNativeTargets.isNotEmpty()) {
+            poisonDanglingOfficialVariants(metadata, officialVariants, supportResult.danglingNativeTargets)
+        }
 
         val variants = getVariants(targetGroup, targetArtifact, version)
         if (variants.isEmpty()) {
@@ -259,6 +283,55 @@ abstract class TvosVariantInjectionRule @Inject constructor(
                 }
                 variantMetadata.withDependencies { deps ->
                     deps.add("$targetGroup:${variant.artifactId}:$version")
+                }
+            }
+        }
+    }
+
+    /**
+     * Task 11 (dangling-metadata fix): de-tunes each ORIGINAL official [officialVariants] entry
+     * whose native target is confirmed dangling ([danglingNativeTargets]) so it can never again
+     * be selected as a candidate for a real consumer request, clearing the way for the freshly
+     * [injectTvosVariants]-added variant (same native target, pointing at the fork) to be the
+     * SOLE match.
+     *
+     * Why this exists at all: once a dangling native target is excluded from
+     * `alreadySupportedTargets`, [execute] injects a normal variant for it exactly as if the
+     * official artifact had never mentioned that target -- but the official artifact's ORIGINAL
+     * variant (the one whose `available-at` redirect is broken) is still sitting there,
+     * unmodified, in this component's metadata. Since [injectTvosVariants] mirrors the fork
+     * variant's attributes 1:1 (the same mechanism Task 10b relies on for the genuinely-official
+     * case), the newly injected variant and the original dangling one end up with IDENTICAL
+     * attribute sets -- Gradle then cannot choose between them and fails the whole component
+     * with a "cannot choose between ..." variant-ambiguity error (confirmed red: the dangling
+     * functional-test scenario failed with exactly this error before this fix was added).
+     *
+     * Why de-tuning attributes rather than something more surgical: [ComponentMetadataDetails]'s
+     * public API has no way to remove a variant outright, and [org.gradle.api.artifacts.VariantMetadata]
+     * has no way to override an EXISTING variant's `available-at` redirect target (its
+     * `withDependencies`/`withFiles` mutate a variant's OWN local dependency/file list, which an
+     * available-at variant doesn't have -- its entire identity is delegated to the target
+     * module). Overwriting the variant's own `org.jetbrains.kotlin.native.target` attribute value
+     * to a value no real consumer request will ever carry is the one lever both APIs do expose:
+     * [ComponentMetadataDetails.withVariant] can still target an already-declared (including
+     * available-at-backed) variant by name, and [org.gradle.api.artifacts.VariantMetadata.attributes]
+     * lets an existing attribute's value be overwritten (not just added to), same as any other
+     * `AttributeContainer`. Once that attribute no longer reads `tvos_arm64` (etc.), the variant
+     * simply stops matching any real `tvosArm64CompileKlibraries`-shaped request, so Gradle's
+     * variant selection is left with exactly one candidate: the injected one.
+     */
+    private fun poisonDanglingOfficialVariants(
+        metadata: ComponentMetadataDetails,
+        officialVariants: List<TvosVariant>,
+        danglingNativeTargets: Set<String>
+    ) {
+        officialVariants.filter { it.nativeTarget in danglingNativeTargets }.forEach { variant ->
+            metadata.withVariant(variant.variantName) { variantMetadata ->
+                variantMetadata.attributes { attrs ->
+                    attrs.attribute(
+                        Attribute.of("org.jetbrains.kotlin.native.target", String::class.java),
+                        "${variant.nativeTarget}-dangling-unavailable"
+                    )
                 }
             }
         }
