@@ -72,18 +72,20 @@ class ComposeTvosFunctionalTest {
         // The variant-discovery cache must land under the TestKit Gradle user home ...
         // (it persists across runs on purpose: on a warm rerun the daemon's in-memory
         // discovery cache may legitimately skip re-writing it.)
-        val cacheFile = testKitDir.resolve("compose-tvos-redirect-cache-v3/dev_sajidali_compose_ui_ui_1_11_0.cache")
+        val cacheFile = testKitDir.resolve("compose-tvos-redirect-cache-v4/dev_sajidali_compose_ui_ui_1_11_0.cache")
         assertTrue(cacheFile.exists(), "discovery cache expected under the TestKit gradle user home: $cacheFile")
         // ... and never under the fake user.home ...
         assertFalse(
-            fakeHome.resolve(".gradle/compose-tvos-redirect-cache-v3").exists(),
+            fakeHome.resolve(".gradle/compose-tvos-redirect-cache-v4").exists(),
             "discovery cache must not land under the fake user.home"
         )
-        // ... nor under the real ~/.gradle.
-        assertFalse(
-            File(System.getProperty("user.home"), ".gradle/compose-tvos-redirect-cache-v3").exists(),
-            "discovery cache must never touch the real ~/.gradle"
-        )
+        // Review of task-20-report.md, Finding 4: the equivalent "nor under the real ~/.gradle"
+        // assertion was removed here -- it false-fails on any machine whose real ~/.gradle
+        // already contains this plugin's cache directory from genuine (non-TestKit) manual
+        // usage, which has nothing to do with this test's isolation. Isolation is already
+        // proven above: the cache lands under `testKitDir` (TestKit's own, non-`~/.gradle`
+        // Gradle user home) and never under `fakeHome` (the `systemProp.user.home` override,
+        // confirmed irrelevant to the plugin's own cache-root resolution).
     }
 
     @Test
@@ -758,6 +760,92 @@ class ComposeTvosFunctionalTest {
         )
     }
 
+    @Test
+    fun `an official umbrella whose available-at target is dangling and has no fork twin fails on the missing fork module, not a variant ambiguity`(
+        @TempDir projectDir: File
+    ) {
+        // Finding 2 (review of task-20-report.md): poisonDanglingOfficialVariants must only
+        // de-tune the official variant's attributes when injection will actually supply a
+        // replacement variant for that same native target. DANGLING_NO_FORK_VERSION publishes
+        // an official umbrella whose tvosArm64 available-at redirect is dangling (mirroring
+        // DANGLING_VERSION above), but -- unlike DANGLING_VERSION -- deliberately publishes NO
+        // dev.sajidali twin at all, so fork discovery for this coordinate is genuinely empty.
+        //
+        // Confirmed red (temporary diagnostic edit to this harness's resolveGraph task, walking
+        // UnresolvedDependencyResult.failure's full cause chain, reverted before the final
+        // commit) against the pre-fix unconditional-poisoning behavior: the official umbrella's
+        // own tvosArm64 variant was de-tuned into unselectability with nothing to replace it, so
+        // Gradle could not select ANY variant of the umbrella at all and failed one level higher
+        // up, with `VariantSelectionByAttributesException: No matching variant of
+        // org.jetbrains.compose.runtime:runtime:... was found` -- never even reaching the
+        // available-at edge, so the substitution-side redirect to the fork's tvosArm64 module
+        // never fired either. With this fix, the original (unpoisoned) official variant stays
+        // selectable, its available-at edge is walked and substituted to the fork coordinate as
+        // usual, and resolution instead fails on a plain missing-module 404 for the FORK's
+        // `runtime-tvosarm64` coordinate -- recognizable, not ambiguity-shaped.
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.runtime:runtime:$DANGLING_NO_FORK_VERSION")
+
+        val result = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withTestKitDir(testKitDir)
+            .withArguments("resolveGraph", "-PresolveTarget=tvosArm64", "--console=plain")
+            .buildAndFail()
+
+        assertTrue(
+            result.output.contains("UNRESOLVED: dev.sajidali.compose.runtime:runtime-tvosarm64:$DANGLING_NO_FORK_VERSION"),
+            "an unreplaced dangling variant must stay selectable so its available-at edge is " +
+                "still substituted and fails on a plain missing-fork-module 404, not an " +
+                "unhelpful variant-selection failure one level higher up on the whole umbrella; " +
+                "got:\n${result.output}"
+        )
+        assertFalse(
+            result.output.contains("UNRESOLVED: org.jetbrains.compose.runtime:runtime:$DANGLING_NO_FORK_VERSION:"),
+            "the umbrella itself must remain resolvable -- poisoning must not make every one of " +
+                "its variants unselectable when there is no injected replacement to leave " +
+                "behind as the sole candidate; got:\n${result.output}"
+        )
+        assertTrue(
+            result.output.contains("[ComposeTvos] WARNING") &&
+                result.output.contains(
+                    "org.jetbrains.compose.runtime:runtime:$DANGLING_NO_FORK_VERSION -> " +
+                        "dev.sajidali.compose.runtime:runtime:$DANGLING_NO_FORK_VERSION"
+                ),
+            "diagnostics must still record this as a genuine empty-discovery WARN, exactly as " +
+                "before this fix; got:\n${result.output}"
+        )
+    }
+
+    @Test
+    fun `a dangling official umbrella with an injected fork replacement also resolves cleanly through the shared appleMain metadata configuration`(
+        @TempDir projectDir: File
+    ) {
+        // Finding 3 (review of task-20-report.md): every other dangling-metadata test in this
+        // class only exercises the native-target-CONSTRAINED compile path
+        // (`tvosArm64CompileKlibraries`). Kotlin's default hierarchy template additionally
+        // resolves shared/intermediate source sets (here `appleMain`, grouping all three
+        // `kotlinTargets` declared by `writeConsumerProject`) through a SEPARATE configuration,
+        // `metadataAppleMainCompileClasspath`, requesting `usage=kotlin-metadata`,
+        // `platform.type=common` -- deliberately NOT the per-native-target `native.target`
+        // attribute `poisonDanglingOfficialVariants` de-tunes. Confirmed by direct inspection
+        // (a throwaway probe project outside this repo) that this configuration resolves
+        // third-party dependencies against their platform-independent `metadataApiElements`
+        // variant, never the `tvosArm64...-published` `available-at` redirects this plugin
+        // injects/poisons -- so no ambiguity is expected on this path. This test pins that:
+        // reusing DANGLING_VERSION (poisoned original + injected fork replacement both present
+        // in the umbrella's metadata) must still resolve cleanly through this independent path.
+        writeConsumerProject(projectDir, dependency = "org.jetbrains.compose.runtime:runtime:$DANGLING_VERSION")
+
+        val result = runResolve(projectDir, target = "metadataAppleMainCompileClasspath")
+
+        val resolved = result.resolvedLines()
+        assertTrue(
+            resolved.any { it.contains("org.jetbrains.compose.runtime:runtime:$DANGLING_VERSION") },
+            "the shared appleMain metadata graph must still resolve the umbrella cleanly, with " +
+                "no variant ambiguity from the poisoned/injected native-target-specific " +
+                "variants; got:\n${resolved.joinToString("\n")}"
+        )
+    }
+
     // -- consumer project scaffolding ----------------------------------------------------
 
     private fun writeConsumerProject(
@@ -832,7 +920,12 @@ class ComposeTvosFunctionalTest {
             // from the root to reproduce the previous `allComponents`/`allDependencies` semantics.
             tasks.register("resolveGraph") {
                 val targetName = providers.gradleProperty("resolveTarget").get()
-                val config = configurations.getByName("${'$'}{targetName}CompileKlibraries")
+                // Finding 3 (review of task-20-report.md): a `resolveTarget` already naming a
+                // full configuration (e.g. `metadataAppleMainCompileClasspath`, the shared
+                // hierarchical source-set metadata path) is used as-is; every other native
+                // target name keeps appending `CompileKlibraries` as before.
+                val configName = if (targetName.startsWith("metadata")) targetName else "${'$'}{targetName}CompileKlibraries"
+                val config = configurations.getByName(configName)
                 val rootComponent = config.incoming.resolutionResult.rootComponent
                 val artifactCollection = config.incoming.artifacts
                 val userHome = System.getProperty("user.home")
@@ -935,6 +1028,16 @@ class ComposeTvosFunctionalTest {
          * shape: official ADVERTISES a redirect, but it points nowhere.
          */
         private const val DANGLING_VERSION = "2.11.0-beta01-dangling-test"
+
+        /**
+         * Finding 2 (review of task-20-report.md): like [DANGLING_VERSION] -- the official
+         * umbrella's tvosArm64 `available-at` redirect is dangling -- but, unlike
+         * [DANGLING_VERSION], deliberately publishes NO `dev.sajidali.compose.runtime:runtime`
+         * twin at all, mirroring [RUNTIME_NO_FORK_VERSION]'s "fork publishes nothing" shape for
+         * the dangling case instead of the genuinely-supported one. Pins that a dangling target
+         * with no fork replacement is never poisoned into an unhelpful ambiguity-shaped failure.
+         */
+        private const val DANGLING_NO_FORK_VERSION = "2.11.0-beta02-dangling-no-fork-test"
 
         /**
          * Task 10d (Phase 4 closeout): an OLD, upstream-only (no dev.sajidali fork counterpart)
@@ -1058,6 +1161,13 @@ class ComposeTvosFunctionalTest {
                 // advertisement above is confirmed dangling.
                 publishUmbrellaWithPlatforms(
                     "dev.sajidali.compose.runtime", "runtime", DANGLING_VERSION,
+                    listOf(FixtureNativeTarget.TVOS_ARM64)
+                )
+                // Finding 2 (review of task-20-report.md): dangling official advertisement,
+                // like DANGLING_VERSION above, but deliberately NO fork twin published at all --
+                // fork discovery for this coordinate must come back genuinely empty.
+                publishUmbrellaWithDanglingPlatforms(
+                    "org.jetbrains.compose.runtime", "runtime", DANGLING_NO_FORK_VERSION,
                     listOf(FixtureNativeTarget.TVOS_ARM64)
                 )
             }
@@ -1601,7 +1711,7 @@ class VersionManifestLoaderHttpTest {
     }
 
     private fun manifestCacheFiles(cacheDir: File): List<File> =
-        cacheDir.resolve("compose-tvos-redirect-cache-v3/version-manifest")
+        cacheDir.resolve("compose-tvos-redirect-cache-v4/version-manifest")
             .listFiles()?.toList().orEmpty()
 }
 

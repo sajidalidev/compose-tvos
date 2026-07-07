@@ -424,7 +424,7 @@ class TvosVariantDiscoveryDiskCacheTest {
         val cacheDir = File(tempDir, "cache")
         val cacheKey = "$groupId:$artifactId:$version"
         val safeKey = cacheKey.replace(":", "_").replace(".", "_")
-        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.cache")
+        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v4/$safeKey.cache")
         cacheFile.parentFile.mkdirs()
         cacheFile.writeText("{ this is not valid cache json at all")
 
@@ -570,7 +570,7 @@ class TvosVariantDiscoveryDiskCacheTest {
 
         val cacheKey = "$groupId:$artifactId:$version"
         val safeKey = cacheKey.replace(":", "_").replace(".", "_")
-        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.cache")
+        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v4/$safeKey.cache")
         assertTrue(cacheFile.exists(), "a successful empty-variant fetch must still write the disk cache")
 
         // Force the disk-read path (clear the in-memory cache) and remove the repository
@@ -598,7 +598,7 @@ class TvosVariantDiscoveryDiskCacheTest {
         val cacheDir = File(tempDir, "cache")
         val cacheKey = "$groupId:$artifactId:$version"
         val safeKey = cacheKey.replace(":", "_").replace(".", "_")
-        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.cache")
+        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v4/$safeKey.cache")
         cacheFile.parentFile.mkdirs()
         cacheFile.writeText("[]")
 
@@ -647,7 +647,7 @@ class TvosVariantDiscoveryDiskCacheTest {
 
         val cacheKey = "$groupId:$artifactId:$version"
         val safeKey = cacheKey.replace(":", "_").replace(".", "_")
-        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.cache")
+        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v4/$safeKey.cache")
         assertFalse(cacheFile.exists(), "a fetch failure must never populate the disk cache")
 
         // Publish the module and retry: a stale, wrongly-cached empty result would have
@@ -803,7 +803,7 @@ class TvosVariantDiscoveryExistenceProbeTest {
 
             val cacheKey = "$groupId:$artifactId:$version"
             val safeKey = cacheKey.replace(":", "_").replace(".", "_")
-            val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.exists")
+            val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v4/$safeKey.exists")
             assertFalse(cacheFile.exists(), "an inconclusive probe outcome must never be written to the disk cache")
         } finally {
             server.stop(0)
@@ -887,7 +887,7 @@ class TvosVariantDiscoveryOfflineTest {
         val cacheDir = File(tempDir, "cache")
         val cacheKey = "$groupId:$artifactId:$version"
         val safeKey = cacheKey.replace(":", "_").replace(".", "_")
-        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v3/$safeKey.cache")
+        val cacheFile = File(cacheDir, "compose-tvos-redirect-cache-v4/$safeKey.cache")
         cacheFile.parentFile.mkdirs()
         cacheFile.writeText(
             """[{"variantName":"tvosArm64ApiElements","nativeTarget":"tvos_arm64","artifactId":"offlinedisktest-tvosarm64","attributes":{}}]"""

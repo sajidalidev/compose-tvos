@@ -24,6 +24,16 @@ All notable changes to this project are documented in this file.
   variant at face value; if the target module it pointed at didn't actually exist, injection and
   substitution were both skipped and resolution failed on the phantom coordinate instead of
   falling through to the fork.
+- The variant-discovery and version-manifest disk caches now live under a new
+  `compose-tvos-redirect-cache-v4` directory (bumped from `v3`; old caches are ignored
+  harmlessly, exactly like the earlier v1/v2 → v3 bump). A cache file written by a 1.1.0 plugin
+  predates the `available-at` group/version fields above and would otherwise silently decode
+  them as `null`, defeating the dangling-metadata existence check just fixed for anyone with a
+  warm 1.1.0 cache.
+- The dangling-metadata fix no longer de-tunes an official umbrella's advertised variant when
+  the fork has no replacement to offer for that same native target: doing so previously turned a
+  recognizable "target module not found" resolution failure into an unhelpful "no matching
+  variant" one, with nothing gained in exchange.
 
 ## [1.1.0] - 2026-07-06
 

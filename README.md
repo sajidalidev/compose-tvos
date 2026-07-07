@@ -74,8 +74,8 @@ your `dependencies {}` declarations:
   never a hard failure. `--refresh-dependencies` forces a fresh manifest fetch (variant-discovery
   caching is unaffected by that flag).
 - **Caches live under `GRADLE_USER_HOME`.** Both the variant-discovery cache
-  (`<gradleUserHome>/compose-tvos-redirect-cache-v3/`) and the version-manifest cache
-  (`<gradleUserHome>/compose-tvos-redirect-cache-v3/version-manifest/`) are resolved from
+  (`<gradleUserHome>/compose-tvos-redirect-cache-v4/`) and the version-manifest cache
+  (`<gradleUserHome>/compose-tvos-redirect-cache-v4/version-manifest/`) are resolved from
   whichever `GRADLE_USER_HOME` (or `--gradle-user-home`) the invoking Gradle actually used — never
   hardcoded to `~/.gradle` — so isolated/CI/TestKit invocations get isolated caches automatically.
 
@@ -256,10 +256,10 @@ If a fork publish changes shape (new tvOS variants, a version bump) and the plug
 stale results, clear the on-disk caches under `GRADLE_USER_HOME`:
 
 ```bash
-rm -rf "$(./gradlew properties -q --property gradleUserHomeDir | awk '{print $2}')/compose-tvos-redirect-cache-v3"
+rm -rf "$(./gradlew properties -q --property gradleUserHomeDir | awk '{print $2}')/compose-tvos-redirect-cache-v4"
 ```
 
-or simply delete `~/.gradle/compose-tvos-redirect-cache-v3` if you use the default
+or simply delete `~/.gradle/compose-tvos-redirect-cache-v4` if you use the default
 `GRADLE_USER_HOME`. `--refresh-dependencies` forces a fresh version-manifest fetch without
 clearing the variant-discovery cache.
 

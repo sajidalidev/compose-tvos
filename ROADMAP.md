@@ -6,7 +6,7 @@ Phases 1–4 of the production-hardening effort are complete on this branch (9+ 
 `8ba9713..2823433`). What actually shipped, in order:
 
 - **Manifest + version resolution rewritten**: the version-override manifest is now fetched as
-  real JSON (kotlinx-serialization) into a versioned on-disk cache (`compose-tvos-redirect-cache-v3`,
+  real JSON (kotlinx-serialization) into a versioned on-disk cache (`compose-tvos-redirect-cache-v4`,
   respecting `GRADLE_USER_HOME`), with deterministic six-tier version-pattern resolution and a
   documented specificity/lexicographic tie-break rule.
 - **Class-based, cacheable `@CacheableRule` metadata rule** replacing the earlier ad hoc rule

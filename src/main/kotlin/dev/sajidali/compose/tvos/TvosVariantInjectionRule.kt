@@ -160,19 +160,6 @@ abstract class TvosVariantInjectionRule @Inject constructor(
         )
         val alreadySupportedTargets = supportResult.supportedNativeTargets
 
-        // Task 11 follow-up: a dangling official variant is still present, UNMODIFIED, in this
-        // component's own metadata -- merely excluding its native target from
-        // alreadySupportedTargets (so injectable below includes it) reproduces the exact
-        // "cannot choose between ..." variant-ambiguity Gradle error Task 10b's whole pre-check
-        // exists to avoid, since our injected variant would carry an IDENTICAL, mirrored
-        // attribute set. See poisonDanglingOfficialVariants's own KDoc for why de-tuning the
-        // dangling variant's own attributes -- rather than removing it (no public API for that)
-        // or overriding its available-at target (also no public API for that) -- is how this is
-        // resolved.
-        if (supportResult.danglingNativeTargets.isNotEmpty()) {
-            poisonDanglingOfficialVariants(metadata, officialVariants, supportResult.danglingNativeTargets)
-        }
-
         val variants = getVariants(targetGroup, targetArtifact, version)
         if (variants.isEmpty()) {
             // Task 10e: fork discovery came back empty. Before treating this as a genuine gap,
@@ -180,6 +167,10 @@ abstract class TvosVariantInjectionRule @Inject constructor(
             // is actually broken (no injection was ever needed for this coordinate) and this
             // must NOT be recorded as an [EmptyDiscoveryRecord] (see
             // TvosDiagnosticsBookkeeping.recordEmptyForkDiscovery for the precedence decision).
+            // Finding 2 (review of task-20-report.md): no poisoning here either -- the fork has
+            // nothing to inject as a replacement, so de-tuning the dangling official variant's
+            // attributes would only trade a recognizable "phantom coordinate" resolution failure
+            // for an unhelpful "no matching variant" one, with no replacement to show for it.
             TvosDiagnosticsBookkeeping.recordEmptyForkDiscovery(
                 sourceModule, targetCoordinate, alreadySupportedTargets, params.repositoryUrls, params.offline
             )
@@ -201,6 +192,30 @@ abstract class TvosVariantInjectionRule @Inject constructor(
         // already-officially-supported case -- exactly the case this whole check exists to
         // avoid in the common path.
         val injectable = variants.filter { it.nativeTarget !in alreadySupportedTargets }
+
+        // Task 11 follow-up: a dangling official variant is still present, UNMODIFIED, in this
+        // component's own metadata -- merely excluding its native target from
+        // alreadySupportedTargets (so injectable above includes it) reproduces the exact
+        // "cannot choose between ..." variant-ambiguity Gradle error Task 10b's whole pre-check
+        // exists to avoid, since our injected variant would carry an IDENTICAL, mirrored
+        // attribute set. See poisonDanglingOfficialVariants's own KDoc for why de-tuning the
+        // dangling variant's own attributes -- rather than removing it (no public API for that)
+        // or overriding its available-at target (also no public API for that) -- is how this is
+        // resolved.
+        //
+        // Finding 2 (review of task-20-report.md): poisoning must only run for a dangling
+        // target that `injectable` will actually replace -- gated here, AFTER `injectable` is
+        // computed, rather than unconditionally on every confirmed-dangling target. If the fork
+        // has no variant for that same native target either, poisoning the official variant
+        // buys nothing (there is no injected replacement to leave as the sole candidate) and
+        // only trades the recognizable "phantom org.jetbrains coordinate" resolution failure for
+        // an unhelpful "no matching variant" one.
+        val replacedDanglingTargets = supportResult.danglingNativeTargets.filterTo(mutableSetOf()) { target ->
+            injectable.any { it.nativeTarget == target }
+        }
+        if (replacedDanglingTargets.isNotEmpty()) {
+            poisonDanglingOfficialVariants(metadata, officialVariants, replacedDanglingTargets)
+        }
 
         if (injectable.size < variants.size) {
             val skippedTargets = variants.filter { it.nativeTarget in alreadySupportedTargets }.map { it.nativeTarget }
@@ -266,7 +281,7 @@ abstract class TvosVariantInjectionRule @Inject constructor(
                         // metadata / sources / runtime variant lookups — if a consumer
                         // reports unresolved references in a shared source set (e.g.
                         // `appleMain`) after upgrading, deleting the cache directory
-                        // (<gradleUserHome>/compose-tvos-redirect-cache-v3/, `~/.gradle` by
+                        // (<gradleUserHome>/compose-tvos-redirect-cache-v4/, `~/.gradle` by
                         // default) forces re-discovery
                         // with the full attribute set.
                         mapOf(
@@ -319,6 +334,13 @@ abstract class TvosVariantInjectionRule @Inject constructor(
      * `AttributeContainer`. Once that attribute no longer reads `tvos_arm64` (etc.), the variant
      * simply stops matching any real `tvosArm64CompileKlibraries`-shaped request, so Gradle's
      * variant selection is left with exactly one candidate: the injected one.
+     *
+     * Finding 2 (review of task-20-report.md): [danglingNativeTargets] as passed by [execute] is
+     * NOT the raw `supportResult.danglingNativeTargets` set -- it is pre-filtered down to only
+     * the targets `injectable` will actually replace. A dangling target the fork has no variant
+     * for either must never reach this function: there would be no injected replacement left
+     * behind, so de-tuning the official variant would only turn a recognizable
+     * "target module not found" resolution failure into an unhelpful "no matching variant" one.
      */
     private fun poisonDanglingOfficialVariants(
         metadata: ComponentMetadataDetails,

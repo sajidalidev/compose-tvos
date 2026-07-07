@@ -39,7 +39,11 @@ internal data class VersionManifest(
  */
 internal object VersionManifestLoader {
 
-    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache-v3/version-manifest"
+    // Review of task-20-report.md, Finding 1: kept in lockstep with
+    // TvosVariantDiscovery.CACHE_DIR_NAME's v3 -> v4 bump so both caches live under the same
+    // parent directory version, even though this loader's own manifest schema wasn't the
+    // trigger for that bump.
+    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache-v4/version-manifest"
     private const val FETCH_TIMEOUT_MS = 5_000
     private const val CACHE_TTL_MS = 24L * 60 * 60 * 1000
 

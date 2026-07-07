@@ -71,7 +71,16 @@ object TvosVariantDiscovery {
     // v3: cache entries are now serialized as JSON (List<TvosVariant> via kotlinx-serialization)
     // instead of the bespoke pipe/comma-delimited format. Old v1/v2 caches are ignored
     // rather than migrated — a single cold network fetch repopulates v3.
-    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache-v3"
+    // v4 (review of task-20-report.md, Finding 1): TvosVariant gained the nullable
+    // availableAtGroup/availableAtVersion fields (Task 11, dangling-metadata fix). A v3 cache
+    // file written by a pre-Task-11 (1.1.0) plugin decodes those two fields as null (thanks to
+    // Json { ignoreUnknownKeys = true }, deserialization doesn't fail) — which
+    // verifyOfficialSupport then reads as "no available-at redirect", i.e. an inline variant
+    // "supported by definition", silently skipping the existence check the Task 11 fix exists
+    // to run. Bumping the cache directory ensures a warm 1.1.0 cache is never read by this
+    // version — old v3 (and earlier) caches are ignored rather than migrated, exactly like the
+    // v1/v2 -> v3 bump above; a single cold network fetch repopulates v4.
+    private const val CACHE_DIR_NAME = "compose-tvos-redirect-cache-v4"
 
     private val json = Json { ignoreUnknownKeys = true }
 

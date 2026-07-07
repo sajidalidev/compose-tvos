@@ -41,17 +41,17 @@ resolved from whichever `GRADLE_USER_HOME` (or `--gradle-user-home`) the invokin
 used — never hardcoded to `~/.gradle` — so isolated/CI/TestKit invocations get isolated caches
 automatically:
 
-- Variant-discovery cache: `<gradleUserHome>/compose-tvos-redirect-cache-v3/`
-- Version-manifest cache: `<gradleUserHome>/compose-tvos-redirect-cache-v3/version-manifest/`
+- Variant-discovery cache: `<gradleUserHome>/compose-tvos-redirect-cache-v4/`
+- Version-manifest cache: `<gradleUserHome>/compose-tvos-redirect-cache-v4/version-manifest/`
 
 If a fork publish changes shape (new tvOS variants, a version bump) and the plugin still reports
 stale results, clear the on-disk cache:
 
 ```bash
-rm -rf "$(./gradlew properties -q --property gradleUserHomeDir | awk '{print $2}')/compose-tvos-redirect-cache-v3"
+rm -rf "$(./gradlew properties -q --property gradleUserHomeDir | awk '{print $2}')/compose-tvos-redirect-cache-v4"
 ```
 
-or simply delete `~/.gradle/compose-tvos-redirect-cache-v3` if you use the default
+or simply delete `~/.gradle/compose-tvos-redirect-cache-v4` if you use the default
 `GRADLE_USER_HOME`.
 
 `--refresh-dependencies` forces a fresh version-manifest fetch without clearing the
