@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-08
+
+### Added
+- `androidx.tv:tv-material` is now a default redirect group with zero consumer config: it's
+  covered by a new explicit group target (`androidx.tv` -> `dev.sajidali.androidx.tv`) merged
+  into the default group mappings, distinct from the `org.jetbrains`-only `ComposeModules.ALL` /
+  `mapGroupId` path since `androidx.tv` is a Google coordinate whose fork target is a prepend,
+  not a prefix replace. A consumer's own `additionalGroups` can still override it.
+
 ## [1.1.1] - 2026-07-07
 
 ### Added

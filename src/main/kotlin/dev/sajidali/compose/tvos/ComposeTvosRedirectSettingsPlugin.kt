@@ -256,6 +256,7 @@ class ComposeTvosRedirectSettingsPlugin : Plugin<Settings> {
         ComposeModules.ALL.forEach { group ->
             groupMappings[group] = TvosArtifactMapping.mapGroupId(group)
         }
+        groupMappings.putAll(ComposeModules.EXPLICIT_GROUP_TARGETS)
         groupMappings.putAll(additionalGroups)
 
         val params = TvosVariantInjectionRule.Params(

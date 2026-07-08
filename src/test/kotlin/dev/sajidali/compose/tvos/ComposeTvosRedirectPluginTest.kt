@@ -1004,6 +1004,25 @@ class ComposeModulesTest {
         assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.collection-internal"))
         assertTrue(ComposeModules.ALL.contains("org.jetbrains.compose.material3.adaptive"))
     }
+
+    @Test
+    fun `EXPLICIT_GROUP_TARGETS maps androidx_tv to the fork's dev_sajidali androidx_tv group`() {
+        assertEquals("dev.sajidali.androidx.tv", ComposeModules.EXPLICIT_GROUP_TARGETS["androidx.tv"])
+    }
+
+    @Test
+    fun `the default group mappings built the same way the settings plugin builds them contain androidx_tv`() {
+        // Mirrors ComposeTvosRedirectSettingsPlugin's group-mapping construction order:
+        // org.jetbrains defaults -> androidx.tv explicit default -> consumer additionalGroups
+        // (empty here), proving the merged default table -- not just the standalone constant --
+        // carries the new mapping.
+        val groupMappings = mutableMapOf<String, String>()
+        ComposeModules.ALL.forEach { group -> groupMappings[group] = TvosArtifactMapping.mapGroupId(group) }
+        groupMappings.putAll(ComposeModules.EXPLICIT_GROUP_TARGETS)
+        groupMappings.putAll(emptyMap())
+
+        assertEquals("dev.sajidali.androidx.tv", groupMappings["androidx.tv"])
+    }
 }
 
 class ComposeArtifactsTest {

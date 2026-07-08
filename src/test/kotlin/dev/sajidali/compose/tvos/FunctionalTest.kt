@@ -206,6 +206,31 @@ class ComposeTvosFunctionalTest {
     }
 
     @Test
+    fun `androidx tv-material is redirected to the fork by default with zero consumer config`(
+        @TempDir projectDir: File
+    ) {
+        // Task: default explicit-target group redirect. androidx.tv has no org.jetbrains
+        // substring, so it can't be covered by ComposeModules.ALL + mapGroupId's prefix
+        // replace -- it's covered instead by ComposeModules.EXPLICIT_GROUP_TARGETS, merged
+        // into the default group mappings. No composeTvosConfig block / additionalGroups
+        // entry is declared here, proving this works out of the box for consumers.
+        writeConsumerProject(
+            projectDir,
+            dependency = "androidx.tv:tv-material:$COMPOSE_VERSION"
+        )
+
+        val result = runResolve(projectDir, target = "tvosArm64")
+
+        val resolved = result.resolvedLines()
+        val umbrella = resolved.single { it.contains("androidx.tv:tv-material:$COMPOSE_VERSION ") }
+        assertContains(umbrella, "-injected", message = "umbrella must be selected through an injected variant: $umbrella")
+        assertTrue(
+            resolved.any { it.contains("dev.sajidali.androidx.tv:tv-material-tvosarm64:$COMPOSE_VERSION") },
+            "graph must contain the fork platform module for the default androidx.tv redirect; got:\n${resolved.joinToString("\n")}"
+        )
+    }
+
+    @Test
     fun `manifest loaded over HTTP drives version mapping end-to-end`(
         @TempDir projectDir: File
     ) {
@@ -1108,6 +1133,18 @@ class ComposeTvosFunctionalTest {
                 // Fork umbrella + platform modules discovered by the plugin.
                 publishUmbrellaWithPlatforms(
                     "dev.sajidali.androidx.lifecycle", "lifecycle-runtime", COMPOSE_VERSION,
+                    listOf(FixtureNativeTarget.TVOS_ARM64, FixtureNativeTarget.TVOS_SIMULATOR_ARM64)
+                )
+                // Default explicit-target group redirect: androidx.tv -> dev.sajidali.androidx.tv,
+                // covered by ComposeModules.EXPLICIT_GROUP_TARGETS (not ALL + mapGroupId, since
+                // androidx.tv has no org.jetbrains substring). Upstream umbrella: iOS only.
+                publishUmbrellaWithPlatforms(
+                    "androidx.tv", "tv-material", COMPOSE_VERSION,
+                    listOf(FixtureNativeTarget.IOS_ARM64)
+                )
+                // Fork umbrella + platform modules discovered by the plugin.
+                publishUmbrellaWithPlatforms(
+                    "dev.sajidali.androidx.tv", "tv-material", COMPOSE_VERSION,
                     listOf(FixtureNativeTarget.TVOS_ARM64, FixtureNativeTarget.TVOS_SIMULATOR_ARM64)
                 )
                 // Cold-offline scenario: upstream-only (iOS-only), deliberately no fork

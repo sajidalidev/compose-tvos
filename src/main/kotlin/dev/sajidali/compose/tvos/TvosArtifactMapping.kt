@@ -707,6 +707,17 @@ object ComposeModules {
         "org.jetbrains.compose.collection-internal",
         "org.jetbrains.compose.material3.adaptive"
     )
+
+    /**
+     * Default group redirects whose target is NOT derived via [TvosArtifactMapping.mapGroupId]'s
+     * `org.jetbrains` -> `dev.sajidali` prefix replace, because the source group isn't rooted at
+     * `org.jetbrains` in the first place. `androidx.tv` is a Google coordinate, so its fork
+     * target is a prepend (`androidx.tv` -> `dev.sajidali.androidx.tv`), not a replace -- these
+     * entries are merged into the final group-mapping table as explicit, literal targets.
+     */
+    val EXPLICIT_GROUP_TARGETS = mapOf(
+        "androidx.tv" to "dev.sajidali.androidx.tv"
+    )
 }
 
 /**
