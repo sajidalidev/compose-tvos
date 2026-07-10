@@ -1011,6 +1011,16 @@ class ComposeModulesTest {
     }
 
     @Test
+    fun `EXPLICIT_GROUP_TARGETS maps io_insert-koin to the fork's dev_sajidali koin group`() {
+        assertEquals("dev.sajidali.koin", ComposeModules.EXPLICIT_GROUP_TARGETS["io.insert-koin"])
+    }
+
+    @Test
+    fun `EXPLICIT_GROUP_TARGETS maps io_coil-kt_coil3 to the fork's dev_sajidali coil3 group`() {
+        assertEquals("dev.sajidali.coil3", ComposeModules.EXPLICIT_GROUP_TARGETS["io.coil-kt.coil3"])
+    }
+
+    @Test
     fun `the default group mappings built the same way the settings plugin builds them contain androidx_tv`() {
         // Mirrors ComposeTvosRedirectSettingsPlugin's group-mapping construction order:
         // org.jetbrains defaults -> androidx.tv explicit default -> consumer additionalGroups
@@ -1022,6 +1032,40 @@ class ComposeModulesTest {
         groupMappings.putAll(emptyMap())
 
         assertEquals("dev.sajidali.androidx.tv", groupMappings["androidx.tv"])
+    }
+
+    @Test
+    fun `the default group mappings built the same way the settings plugin builds them contain io_insert-koin and io_coil-kt_coil3`() {
+        // Mirrors ComposeTvosRedirectSettingsPlugin's group-mapping construction order:
+        // org.jetbrains defaults -> explicit defaults (androidx.tv, koin, coil3) -> consumer
+        // additionalGroups (empty here), proving the merged default table -- not just the
+        // standalone constant -- carries the new mappings.
+        val groupMappings = mutableMapOf<String, String>()
+        ComposeModules.ALL.forEach { group -> groupMappings[group] = TvosArtifactMapping.mapGroupId(group) }
+        groupMappings.putAll(ComposeModules.EXPLICIT_GROUP_TARGETS)
+        groupMappings.putAll(emptyMap())
+
+        assertEquals("dev.sajidali.koin", groupMappings["io.insert-koin"])
+        assertEquals("dev.sajidali.coil3", groupMappings["io.coil-kt.coil3"])
+    }
+
+    @Test
+    fun `consumer additionalGroups override the explicit defaults for koin and coil3`() {
+        // Mirrors ComposeTvosRedirectSettingsPlugin's group-mapping construction order, this
+        // time with a non-empty additionalGroups map, proving consumer overrides still win over
+        // the explicit defaults merged in ahead of them.
+        val groupMappings = mutableMapOf<String, String>()
+        ComposeModules.ALL.forEach { group -> groupMappings[group] = TvosArtifactMapping.mapGroupId(group) }
+        groupMappings.putAll(ComposeModules.EXPLICIT_GROUP_TARGETS)
+        groupMappings.putAll(
+            mapOf(
+                "io.insert-koin" to "com.example.override.koin",
+                "io.coil-kt.coil3" to "com.example.override.coil3"
+            )
+        )
+
+        assertEquals("com.example.override.koin", groupMappings["io.insert-koin"])
+        assertEquals("com.example.override.coil3", groupMappings["io.coil-kt.coil3"])
     }
 }
 

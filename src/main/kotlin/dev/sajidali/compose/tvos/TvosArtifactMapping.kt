@@ -714,9 +714,15 @@ object ComposeModules {
      * `org.jetbrains` in the first place. `androidx.tv` is a Google coordinate, so its fork
      * target is a prepend (`androidx.tv` -> `dev.sajidali.androidx.tv`), not a replace -- these
      * entries are merged into the final group-mapping table as explicit, literal targets.
+     *
+     * `io.insert-koin` (Koin) and `io.coil-kt.coil3` (Coil) are third-party coordinates with the
+     * same shape: neither is rooted at `org.jetbrains`, so each gets its own explicit, literal
+     * fork target (`io.insert-koin` -> `dev.sajidali.koin`, `io.coil-kt.coil3` -> `dev.sajidali.coil3`).
      */
     val EXPLICIT_GROUP_TARGETS = mapOf(
-        "androidx.tv" to "dev.sajidali.androidx.tv"
+        "androidx.tv" to "dev.sajidali.androidx.tv",
+        "io.insert-koin" to "dev.sajidali.koin",
+        "io.coil-kt.coil3" to "dev.sajidali.coil3"
     )
 }
 

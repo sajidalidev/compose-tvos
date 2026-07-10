@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-10
+
+### Added
+- `io.insert-koin` and `io.coil-kt.coil3` are now default redirect groups with zero consumer
+  config, following the same explicit-group-target pattern added for `androidx.tv` in 1.2.0:
+  `io.insert-koin` -> `dev.sajidali.koin` and `io.coil-kt.coil3` -> `dev.sajidali.coil3`, merged
+  into the default group mappings ahead of a consumer's own `additionalGroups` (which can still
+  override either). Pairs with the fork's `dev.sajidali.koin` (Koin, `4.2.0`, tvOS-only modules)
+  and `dev.sajidali.coil3` (Coil, `3.5.0`) artifacts, both following the same-version convention
+  so no manifest change is needed.
+
 ## [1.2.0] - 2026-07-08
 
 ### Added
